@@ -7,9 +7,13 @@
 import drawsvg as draw
 import random
 import math
-stroke_width = 1
-max_x_boxes=10
-max_y_boxes=13
+import sys
+from datetime import datetime
+stroke_width = 0.5
+max_x_boxes=20
+max_y_boxes=20
+shading_style = 'hatch'  # 'none', 'accent', 'hatch', 'double-wall'
+shading_stroke_width = stroke_width * 0.6
 
 d = draw.Drawing(1500, 1500, origin='center', displayInline=False)
 
@@ -47,32 +51,86 @@ l_tube.append(draw.Rectangle(-30,-50,60,100, fill='white', stroke='none'))
 l_tube.append(draw.Line(-30,-50,-30,50, fill='none', stroke='black', stroke_width=stroke_width))
 l_tube.append(draw.Line(30,-50,30,50, fill='none', stroke='black', stroke_width=stroke_width))
 
+def add_tube_shading(group, style, sw):
+    if style == 'none':
+        return
+    elif style == 'accent':
+        group.append(draw.Line(22, -50, 22, 50, stroke='black', stroke_width=sw, fill='none'))
+    elif style == 'double-wall':
+        group.append(draw.Line(27, -50, 27, 50, stroke='black', stroke_width=sw, fill='none'))
+    elif style == 'hatch':
+        dy_per_dx = math.tan(math.radians(30))
+        for y0 in range(-42, 43, 12):
+            x1, y1 = -28, y0 - 28 * dy_per_dx
+            x2, y2 = 28, y0 + 28 * dy_per_dx
+            if y1 < -48:
+                x1 = x1 + (-48 - y1) / dy_per_dx
+                y1 = -48
+            if y2 > 48:
+                x2 = x2 - (y2 - 48) / dy_per_dx
+                y2 = 48
+            if y1 > 48 or y2 < -48:
+                continue
+            group.append(draw.Line(x1, y1, x2, y2, stroke='black', stroke_width=sw, fill='none'))
+
+def add_corner_shading(group, style, sw):
+    if style == 'none':
+        return
+    cx, cy = 40, 40
+    if style == 'accent':
+        group.append(draw.Arc(cx, cy, 62, 180, 270, cw=True, stroke='black', stroke_width=sw, fill='none'))
+        group.append(draw.Line(43, -30, 43, 30, stroke='black', stroke_width=sw, fill='none'))
+        group.append(draw.Line(-30, 43, 30, 43, stroke='black', stroke_width=sw, fill='none'))
+    elif style == 'double-wall':
+        group.append(draw.Arc(cx, cy, 67, 180, 270, cw=True, stroke='black', stroke_width=sw, fill='none'))
+        group.append(draw.Line(42, -30, 42, 30, stroke='black', stroke_width=sw, fill='none'))
+        group.append(draw.Line(-30, 42, 30, 42, stroke='black', stroke_width=sw, fill='none'))
+    elif style == 'hatch':
+        r_inner, r_outer = 12, 68
+        num_hatches = 6
+        for i in range(num_hatches):
+            angle_deg = 185 + i * (80 / (num_hatches - 1))
+            angle_rad = math.radians(angle_deg)
+            x1 = cx + r_inner * math.cos(angle_rad)
+            y1 = cy + r_inner * math.sin(angle_rad)
+            x2 = cx + r_outer * math.cos(angle_rad)
+            y2 = cy + r_outer * math.sin(angle_rad)
+            group.append(draw.Line(x1, y1, x2, y2, stroke='black', stroke_width=sw, fill='none'))
+        # Right connector hatches
+        for y0 in [-15, 0, 15]:
+            group.append(draw.Line(41, y0 - 3.5, 48, y0 + 3.5, stroke='black', stroke_width=sw, fill='none'))
+        # Bottom connector hatches
+        for x0 in [-15, 0, 15]:
+            group.append(draw.Line(x0 - 3.5, 41, x0 + 3.5, 48, stroke='black', stroke_width=sw, fill='none'))
+
+add_corner_shading(l_corner, shading_style, shading_stroke_width)
+add_tube_shading(l_tube, shading_style, shading_stroke_width)
+
 def sdraw(ch,x,y):
     global d
     xloc = x * 100
     yloc = y * 100
     trans_string = "translate("+str(xloc)+","+str(yloc)+")"
-    match ch:
-        case "r":
-            d.append(draw.Use(l_corner, 0,0, transform=trans_string))
-        case "7":
-            d.append(draw.Use(l_corner, 0,0, transform=trans_string+" rotate(90)"))
-        case "j":
-            d.append(draw.Use(l_corner, 0,0, transform=trans_string+" rotate(180)"))
-        case "L":
-            d.append(draw.Use(l_corner, 0,0, transform=trans_string+" rotate(270)")) 
-        case "|":
+    if ch == "r":
+        d.append(draw.Use(l_corner, 0,0, transform=trans_string))
+    elif ch == "7":
+        d.append(draw.Use(l_corner, 0,0, transform=trans_string+" rotate(90)"))
+    elif ch == "j":
+        d.append(draw.Use(l_corner, 0,0, transform=trans_string+" rotate(180)"))
+    elif ch == "L":
+        d.append(draw.Use(l_corner, 0,0, transform=trans_string+" rotate(270)"))
+    elif ch == "|":
+        d.append(draw.Use(l_tube, 0,0, transform=trans_string+" rotate(0)"))
+    elif ch == "-":
+        d.append(draw.Use(l_tube, 0,0, transform=trans_string+" rotate(90)"))
+    elif ch == "+":
+        k = random.randint(0, 1)
+        if k == 0:
             d.append(draw.Use(l_tube, 0,0, transform=trans_string+" rotate(0)"))
-        case "-":
-            d.append(draw.Use(l_tube, 0,0, transform=trans_string+" rotate(90)"))  
-        case "+":
-            k = random.randint(0, 1)
-            if (k == 0):
-                d.append(draw.Use(l_tube, 0,0, transform=trans_string+" rotate(0)"))
-                d.append(draw.Use(l_tube, 0,0, transform=trans_string+" rotate(90)"))              
-            else:
-                d.append(draw.Use(l_tube, 0,0, transform=trans_string+" rotate(90)"))              
-                d.append(draw.Use(l_tube, 0,0, transform=trans_string+" rotate(0)"))
+            d.append(draw.Use(l_tube, 0,0, transform=trans_string+" rotate(90)"))
+        else:
+            d.append(draw.Use(l_tube, 0,0, transform=trans_string+" rotate(90)"))
+            d.append(draw.Use(l_tube, 0,0, transform=trans_string+" rotate(0)"))
 
 # ============================================================================
 # PIPE CONNECTION LOGIC
@@ -345,8 +403,10 @@ def collapse_cell(poss_grid, x, y):
         return True
     return False
 
-def wave_function_collapse(width, height, max_iterations=10000):
+def wave_function_collapse(width, height, max_iterations=10000, attempt=1):
     """Main WFC algorithm to generate a valid pipe grid"""
+    total_cells = width * height
+    print(f"Attempt {attempt}: generating {width}x{height} grid ({total_cells} cells)")
     poss_grid = create_possibility_grid(width, height)
 
     # Apply initial border constraints
@@ -373,11 +433,16 @@ def wave_function_collapse(width, height, max_iterations=10000):
 
         # Collapse this cell
         if not collapse_cell(poss_grid, x, y):
-            print(f"Failed to collapse cell ({x}, {y}) - contradiction!")
+            print(f"\nFailed to collapse cell ({x}, {y}) - contradiction!")
             return None
 
         # Propagate constraints
         propagate_constraints(poss_grid, width, height)
+
+        # Report progress
+        collapsed = sum(1 for cx in range(width) for cy in range(height) if len(poss_grid[cx][cy]) == 1)
+        sys.stdout.write(f"\r  Collapsed {collapsed}/{total_cells} cells ({100*collapsed//total_cells}%)")
+        sys.stdout.flush()
 
         # Check for contradictions (cells with 0 possibilities)
         contradiction = False
@@ -391,7 +456,10 @@ def wave_function_collapse(width, height, max_iterations=10000):
 
         if contradiction:
             # Restart with new random seed
-            return wave_function_collapse(width, height, max_iterations)
+            print(f"\n  Contradiction found, restarting...")
+            return wave_function_collapse(width, height, max_iterations, attempt + 1)
+
+    print(f"\n  Done! ({iterations} iterations)")
 
     # Convert possibility grid to final grid
     final_grid = [['' for _ in range(height)] for _ in range(width)]
@@ -417,7 +485,9 @@ if grid:
         for y in range(max_y_boxes):
             sdraw(grid[x][y], x - (math.floor(max_x_boxes / 2)), y - (math.floor(max_y_boxes / 2)))
 
-d.save_svg('pipes.svg')
+filename = f"pipes-{datetime.now().strftime('%Y%m%d-%H%M%S')}.svg"
+d.save_svg(filename)
+print(f"Saved: {filename}")
 d  # Display as SVG
 
 
