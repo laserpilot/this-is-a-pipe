@@ -12,8 +12,33 @@ from datetime import datetime
 stroke_width = 0.5
 max_x_boxes=20
 max_y_boxes=20
-shading_style = 'hatch'  # 'none', 'accent', 'hatch', 'double-wall'
+shading_style = 'directional-hatch'  # 'none', 'accent', 'hatch', 'double-wall', 'directional-hatch'
 shading_stroke_width = stroke_width * 0.6
+
+# --- Directional shading parameters ---
+SHADOW_BAND_WIDTH = 12     # width of hatch band (out of 30 half-width)
+SHADOW_BAND_OFFSET = 3     # gap from pipe wall to band edge
+HATCH_SPACING = 10         # base spacing between hatch lines
+HATCH_ANGLE_DEG = 30       # base angle of hatches relative to pipe tangent
+HATCH_JITTER_POS = 1.5     # max position jitter in units
+HATCH_JITTER_ANGLE = 3.0   # max angle jitter in degrees
+
+def _normalize(v):
+    mag = math.sqrt(v[0]**2 + v[1]**2)
+    if mag < 1e-10:
+        return (0.0, 0.0)
+    return (v[0] / mag, v[1] / mag)
+
+def _dot(a, b):
+    return a[0] * b[0] + a[1] * b[1]
+
+def _rotate_vec(v, angle_deg):
+    rad = math.radians(angle_deg)
+    cos_a, sin_a = math.cos(rad), math.sin(rad)
+    return (v[0] * cos_a - v[1] * sin_a, v[0] * sin_a + v[1] * cos_a)
+
+# Light direction: points FROM scene TOWARD light source (top-left)
+LIGHT_DIR = _normalize((-1, -1))
 
 d = draw.Drawing(1500, 1500, origin='center', displayInline=False)
 
@@ -103,8 +128,180 @@ def add_corner_shading(group, style, sw):
         for x0 in [-15, 0, 15]:
             group.append(draw.Line(x0 - 3.5, 41, x0 + 3.5, 48, stroke='black', stroke_width=sw, fill='none'))
 
-add_corner_shading(l_corner, shading_style, shading_stroke_width)
-add_tube_shading(l_tube, shading_style, shading_stroke_width)
+effective_group_style = 'none' if shading_style == 'directional-hatch' else shading_style
+add_corner_shading(l_corner, effective_group_style, shading_stroke_width)
+add_tube_shading(l_tube, effective_group_style, shading_stroke_width)
+
+def draw_tube_directional_shading(drawing, ch, xloc, yloc, light_dir, sw):
+    """Draw directional hatch marks on the shadow side of a straight tube."""
+    # Determine tangent and wall normals based on tile character
+    if ch == '|':
+        tangent = (0, 1)
+        normal_left = (-1, 0)
+        normal_right = (1, 0)
+    elif ch == '-':
+        tangent = (1, 0)
+        normal_left = (0, -1)
+        normal_right = (0, 1)
+    else:
+        return
+
+    # Shadow side: wall whose outward normal has negative dot with light dir
+    dot_left = _dot(normal_left, light_dir)
+    dot_right = _dot(normal_right, light_dir)
+
+    if dot_left < dot_right:
+        shadow_normal = normal_left
+    else:
+        shadow_normal = normal_right
+
+    # Band center: offset from pipe center toward shadow wall
+    band_center_dist = 30 - SHADOW_BAND_OFFSET - SHADOW_BAND_WIDTH / 2
+
+    # Generate hatch lines along tube length
+    num_hatches = int(90 / HATCH_SPACING)
+    for i in range(num_hatches + 1):
+        t = -45 + i * (90.0 / num_hatches)
+        t += random.uniform(-HATCH_JITTER_POS, HATCH_JITTER_POS)
+
+        # Base point at band center, position t along tube
+        base_x = xloc + tangent[0] * t + shadow_normal[0] * band_center_dist
+        base_y = yloc + tangent[1] * t + shadow_normal[1] * band_center_dist
+
+        # Hatch direction: tangent rotated by hatch angle
+        angle = HATCH_ANGLE_DEG + random.uniform(-HATCH_JITTER_ANGLE, HATCH_JITTER_ANGLE)
+        hatch_dir = _rotate_vec(tangent, angle)
+        half_len = SHADOW_BAND_WIDTH * 0.6
+
+        x1 = base_x - hatch_dir[0] * half_len
+        y1 = base_y - hatch_dir[1] * half_len
+        x2 = base_x + hatch_dir[0] * half_len
+        y2 = base_y + hatch_dir[1] * half_len
+
+        drawing.append(draw.Line(x1, y1, x2, y2,
+                                 stroke='black', stroke_width=sw, fill='none'))
+
+
+def draw_corner_directional_shading(drawing, ch, xloc, yloc, light_dir, sw):
+    """Draw directional hatch marks on the shadow portion of a corner piece."""
+    rotations = {'r': 0, '7': 90, 'j': 180, 'L': 270}
+    rot_deg = rotations[ch]
+
+    # Corner arc center is at local (40, 40), rotated into world coords
+    local_center = (40, 40)
+    world_offset = _rotate_vec(local_center, rot_deg)
+    arc_cx = xloc + world_offset[0]
+    arc_cy = yloc + world_offset[1]
+
+    r_outer = 70
+
+    # Arc spans 90 degrees: base 180-270 in local, shifted by rotation
+    arc_start = 180 + rot_deg
+    arc_end = 270 + rot_deg
+
+    # Sample points along the arc for shadow detection
+    num_samples = 8
+    for i in range(num_samples):
+        frac = (i + 0.5) / num_samples
+        angle_deg = arc_start + frac * (arc_end - arc_start)
+        angle_rad = math.radians(angle_deg)
+
+        # Outward normal at this arc point (points away from center)
+        outward_normal = (math.cos(angle_rad), math.sin(angle_rad))
+
+        # Only draw where surface faces away from light (shadow)
+        if _dot(outward_normal, light_dir) >= 0:
+            continue
+
+        # Band near the outer edge of the arc
+        band_outer = r_outer - SHADOW_BAND_OFFSET
+        band_inner = band_outer - SHADOW_BAND_WIDTH
+        band_mid = (band_inner + band_outer) / 2
+
+        base_x = arc_cx + math.cos(angle_rad) * band_mid
+        base_y = arc_cy + math.sin(angle_rad) * band_mid
+
+        # Hatch direction: tangent to the arc with jitter
+        tangent = (-math.sin(angle_rad), math.cos(angle_rad))
+        jitter_angle = random.uniform(-HATCH_JITTER_ANGLE, HATCH_JITTER_ANGLE)
+        hatch_dir = _rotate_vec(tangent, jitter_angle)
+        half_len = SHADOW_BAND_WIDTH * 0.6
+
+        # Position jitter along the arc
+        pos_jitter = random.uniform(-HATCH_JITTER_POS, HATCH_JITTER_POS)
+        base_x += tangent[0] * pos_jitter
+        base_y += tangent[1] * pos_jitter
+
+        x1 = base_x - hatch_dir[0] * half_len
+        y1 = base_y - hatch_dir[1] * half_len
+        x2 = base_x + hatch_dir[0] * half_len
+        y2 = base_y + hatch_dir[1] * half_len
+
+        drawing.append(draw.Line(x1, y1, x2, y2,
+                                 stroke='black', stroke_width=sw, fill='none'))
+
+    # Shade the straight connector stubs
+    # In local coords, corner has two stubs:
+    #   Right stub: tangent (0,1), centered around x=47.5, extends y=-30 to y=30
+    #   Bottom stub: tangent (1,0), centered around y=47.5, extends x=-30 to x=30
+    stubs = [
+        ((0, 1), (47.5, 0), 58),   # right stub: tangent, center offset, length
+        ((1, 0), (0, 47.5), 58),   # bottom stub
+    ]
+    for (tang_local, center_local, stub_len) in stubs:
+        tangent = _rotate_vec(tang_local, rot_deg)
+        center_offset = _rotate_vec(center_local, rot_deg)
+        stub_cx = xloc + center_offset[0]
+        stub_cy = yloc + center_offset[1]
+
+        # Determine stub normals (perpendicular to tangent)
+        normal_a = _rotate_vec(tangent, 90)
+        normal_b = _rotate_vec(tangent, -90)
+
+        dot_a = _dot(normal_a, light_dir)
+        dot_b = _dot(normal_b, light_dir)
+
+        if dot_a >= 0 and dot_b >= 0:
+            continue  # both sides face light
+
+        shadow_normal = normal_a if dot_a < dot_b else normal_b
+
+        # Draw 3 hatch marks along this stub
+        for j in range(3):
+            t = -stub_len / 4 + j * (stub_len / 4)
+            t += random.uniform(-HATCH_JITTER_POS, HATCH_JITTER_POS)
+
+            base_x = stub_cx + tangent[0] * t + shadow_normal[0] * 1.5
+            base_y = stub_cy + tangent[1] * t + shadow_normal[1] * 1.5
+
+            angle = HATCH_ANGLE_DEG + random.uniform(-HATCH_JITTER_ANGLE, HATCH_JITTER_ANGLE)
+            hatch_dir = _rotate_vec(tangent, angle)
+            half_len = 3.0
+
+            x1 = base_x - hatch_dir[0] * half_len
+            y1 = base_y - hatch_dir[1] * half_len
+            x2 = base_x + hatch_dir[0] * half_len
+            y2 = base_y + hatch_dir[1] * half_len
+
+            drawing.append(draw.Line(x1, y1, x2, y2,
+                                     stroke='black', stroke_width=sw, fill='none'))
+
+
+def sdraw_shading(ch, x, y):
+    """Draw directional shading for a placed tile (second pass)."""
+    global d
+    if shading_style != 'directional-hatch':
+        return
+    xloc = x * 100
+    yloc = y * 100
+    if ch in ('|', '-'):
+        draw_tube_directional_shading(d, ch, xloc, yloc, LIGHT_DIR, shading_stroke_width)
+    elif ch in ('r', '7', 'j', 'L'):
+        draw_corner_directional_shading(d, ch, xloc, yloc, LIGHT_DIR, shading_stroke_width)
+    elif ch == '+':
+        draw_tube_directional_shading(d, '|', xloc, yloc, LIGHT_DIR, shading_stroke_width)
+        draw_tube_directional_shading(d, '-', xloc, yloc, LIGHT_DIR, shading_stroke_width)
+
 
 def sdraw(ch,x,y):
     global d
@@ -481,9 +678,15 @@ def wave_function_collapse(width, height, max_iterations=10000, attempt=1):
 grid = wave_function_collapse(max_x_boxes, max_y_boxes)
 
 if grid:
+    # First pass: draw tile outlines
     for x in range(max_x_boxes):
         for y in range(max_y_boxes):
             sdraw(grid[x][y], x - (math.floor(max_x_boxes / 2)), y - (math.floor(max_y_boxes / 2)))
+
+    # Second pass: directional shading (drawn on top of outlines)
+    for x in range(max_x_boxes):
+        for y in range(max_y_boxes):
+            sdraw_shading(grid[x][y], x - (math.floor(max_x_boxes / 2)), y - (math.floor(max_y_boxes / 2)))
 
 filename = f"pipes-{datetime.now().strftime('%Y%m%d-%H%M%S')}.svg"
 d.save_svg(filename)

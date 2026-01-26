@@ -1,6 +1,180 @@
 import drawsvg as draw
 import random
 import math
+from shapely.geometry import Polygon, LineString
+from shapely.ops import unary_union
+
+# ============================================================================
+# DIRECTIONAL SHADING HELPERS
+# ============================================================================
+
+# Default shading parameters (can be overridden via render_svg)
+DEFAULT_SHADING_PARAMS = {
+    'band_width': 12,       # width of hatch band (out of 30 half-width)
+    'band_offset': 3,       # gap from pipe wall to band edge
+    'spacing': 10,          # base spacing between hatch lines
+    'angle': 30,            # base angle of hatches relative to pipe tangent
+    'jitter_pos': 1.5,      # max position jitter in units
+    'jitter_angle': 3.0,    # max angle jitter in degrees
+    'crosshatch': False,    # enable second hatch direction
+    'crosshatch_angle': 90, # offset from primary hatch angle
+}
+
+
+def _normalize(v):
+    mag = math.sqrt(v[0]**2 + v[1]**2)
+    if mag < 1e-10:
+        return (0.0, 0.0)
+    return (v[0] / mag, v[1] / mag)
+
+
+def _dot(a, b):
+    return a[0] * b[0] + a[1] * b[1]
+
+
+def _rotate_vec(v, angle_deg):
+    rad = math.radians(angle_deg)
+    cos_a, sin_a = math.cos(rad), math.sin(rad)
+    return (v[0] * cos_a - v[1] * sin_a, v[0] * sin_a + v[1] * cos_a)
+
+
+# ============================================================================
+# POLYGON CLIPPING HELPERS
+# ============================================================================
+
+def get_tube_polygon(ch, xloc, yloc):
+    """Return Shapely Polygon for a straight tube segment."""
+    if ch == '|':
+        return Polygon([
+            (xloc - 30, yloc - 50), (xloc + 30, yloc - 50),
+            (xloc + 30, yloc + 50), (xloc - 30, yloc + 50)
+        ])
+    elif ch == '-':
+        return Polygon([
+            (xloc - 50, yloc - 30), (xloc + 50, yloc - 30),
+            (xloc + 50, yloc + 30), (xloc - 50, yloc + 30)
+        ])
+    return None
+
+
+def get_corner_polygon(ch, xloc, yloc, num_arc_points=16):
+    """Return Shapely Polygon for a corner arc segment (approximated)."""
+    rotations = {'r': 0, '7': 90, 'j': 180, 'L': 270}
+    rot_deg = rotations.get(ch)
+    if rot_deg is None:
+        return None
+
+    # Arc center in world coords
+    local_center = (40, 40)
+    world_offset = _rotate_vec(local_center, rot_deg)
+    arc_cx = xloc + world_offset[0]
+    arc_cy = yloc + world_offset[1]
+
+    r_inner = 10
+    r_outer = 70
+    arc_start = 180 + rot_deg
+    arc_end = 270 + rot_deg
+
+    # Build polygon: trace outer arc, then inner arc backwards
+    points = []
+
+    # Outer arc (forward)
+    for i in range(num_arc_points + 1):
+        frac = i / num_arc_points
+        angle_deg = arc_start + frac * (arc_end - arc_start)
+        angle_rad = math.radians(angle_deg)
+        x = arc_cx + r_outer * math.cos(angle_rad)
+        y = arc_cy + r_outer * math.sin(angle_rad)
+        points.append((x, y))
+
+    # Inner arc (backwards)
+    for i in range(num_arc_points, -1, -1):
+        frac = i / num_arc_points
+        angle_deg = arc_start + frac * (arc_end - arc_start)
+        angle_rad = math.radians(angle_deg)
+        x = arc_cx + r_inner * math.cos(angle_rad)
+        y = arc_cy + r_inner * math.sin(angle_rad)
+        points.append((x, y))
+
+    return Polygon(points)
+
+
+def get_pipe_polygon(ch, xloc, yloc):
+    """Return Shapely Polygon for any pipe segment."""
+    if ch in ('|', '-'):
+        return get_tube_polygon(ch, xloc, yloc)
+    elif ch in ('r', '7', 'j', 'L'):
+        return get_corner_polygon(ch, xloc, yloc)
+    elif ch == '+':
+        # Crossover: union of vertical and horizontal tubes
+        v = get_tube_polygon('|', xloc, yloc)
+        h = get_tube_polygon('-', xloc, yloc)
+        if v and h:
+            return unary_union([v, h])
+    return None
+
+
+def build_occlusion_polygon(grid, exclude_x, exclude_y):
+    """Build a union polygon of all pipe segments EXCEPT the one at (exclude_x, exclude_y).
+
+    This is used to clip hatches so they don't extend into other pipes.
+    """
+    width = len(grid)
+    height = len(grid[0]) if width > 0 else 0
+    half_w = width // 2
+    half_h = height // 2
+
+    polygons = []
+    for x in range(width):
+        for y in range(height):
+            if x == exclude_x and y == exclude_y:
+                continue
+            ch = grid[x][y]
+            xloc = (x - half_w) * 100
+            yloc = (y - half_h) * 100
+            poly = get_pipe_polygon(ch, xloc, yloc)
+            if poly and poly.is_valid:
+                polygons.append(poly)
+
+    if not polygons:
+        return None
+    return unary_union(polygons)
+
+
+def clip_line_to_polygon(x1, y1, x2, y2, polygon, exclusion=None):
+    """Clip a line segment to stay within polygon and outside exclusion.
+
+    Returns list of (x1, y1, x2, y2) tuples for visible line segments.
+    """
+    line = LineString([(x1, y1), (x2, y2)])
+
+    # First intersect with the pipe polygon (stay inside)
+    clipped = line.intersection(polygon)
+
+    if clipped.is_empty:
+        return []
+
+    # If there's an exclusion polygon, subtract it
+    if exclusion is not None:
+        clipped = clipped.difference(exclusion)
+
+    if clipped.is_empty:
+        return []
+
+    # Handle result (could be LineString, MultiLineString, or GeometryCollection)
+    result = []
+    if clipped.geom_type == 'LineString':
+        coords = list(clipped.coords)
+        if len(coords) >= 2:
+            result.append((coords[0][0], coords[0][1], coords[-1][0], coords[-1][1]))
+    elif clipped.geom_type == 'MultiLineString':
+        for geom in clipped.geoms:
+            coords = list(geom.coords)
+            if len(coords) >= 2:
+                result.append((coords[0][0], coords[0][1], coords[-1][0], coords[-1][1]))
+
+    return result
+
 
 # ============================================================================
 # PIPE CONNECTION LOGIC
@@ -306,20 +480,20 @@ def add_corner_shading(group, style, sw):
 
 
 def build_corner_tile(stroke_width, shading_style, shading_stroke_width):
-    group = draw.Group(id='l_corner', fill='white')
+    group = draw.Group(id='l_corner', fill='none')
     mask = draw.Mask()
     box = draw.Circle(40, 40, 10, fill='green')
     mask.append(box)
-    group.append(draw.Arc(40, 40, 70, 180, 270, cw=True, stroke='black', stroke_width=stroke_width, fill='white'))
-    group.append(draw.Lines(40, -30, -30, 40, 30, 40, 40, 30, fill='white', stroke='none', mask=not mask))
-    group.append(draw.Circle(40, 40, 10, fill='white'))
+    group.append(draw.Arc(40, 40, 70, 180, 270, cw=True, stroke='black', stroke_width=stroke_width, fill='none'))
+    group.append(draw.Lines(40, -30, -30, 40, 30, 40, 40, 30, fill='none', stroke='none', mask=not mask))
+    group.append(draw.Circle(40, 40, 10, fill='none'))
     group.append(draw.Arc(40, 40, 10, 180, 270, cw=True, stroke='black', stroke_width=stroke_width, fill='none'))
-    group.append(draw.Rectangle(40, -35, 5, 70, fill='white', stroke='black', stroke_width=stroke_width))
-    group.append(draw.Rectangle(-35, 40, 70, 5, fill='white', stroke='black', stroke_width=stroke_width))
-    group.append(draw.Rectangle(46, -29, 5, 58, fill='white', stroke='none'))
+    group.append(draw.Rectangle(40, -35, 5, 70, fill='none', stroke='black', stroke_width=stroke_width))
+    group.append(draw.Rectangle(-35, 40, 70, 5, fill='none', stroke='black', stroke_width=stroke_width))
+    group.append(draw.Rectangle(46, -29, 5, 58, fill='none', stroke='none'))
     group.append(draw.Line(45, 30, 50, 30, fill='none', stroke='black', stroke_width=stroke_width))
     group.append(draw.Line(45, -30, 50, -30, fill='none', stroke='black', stroke_width=stroke_width))
-    group.append(draw.Rectangle(-29, 46, 58, 5, fill='white', stroke='none'))
+    group.append(draw.Rectangle(-29, 46, 58, 5, fill='none', stroke='none'))
     group.append(draw.Line(30, 45, 30, 50, fill='none', stroke='black', stroke_width=stroke_width))
     group.append(draw.Line(-30, 45, -30, 50, fill='none', stroke='black', stroke_width=stroke_width))
     add_corner_shading(group, shading_style, shading_stroke_width)
@@ -328,15 +502,158 @@ def build_corner_tile(stroke_width, shading_style, shading_stroke_width):
 
 def build_tube_tile(stroke_width, shading_style, shading_stroke_width):
     group = draw.Group(id='l_tube', fill='none')
-    group.append(draw.Rectangle(-30, -50, 60, 100, fill='white', stroke='none'))
+    group.append(draw.Rectangle(-30, -50, 60, 100, fill='none', stroke='none'))
     group.append(draw.Line(-30, -50, -30, 50, fill='none', stroke='black', stroke_width=stroke_width))
     group.append(draw.Line(30, -50, 30, 50, fill='none', stroke='black', stroke_width=stroke_width))
     add_tube_shading(group, shading_style, shading_stroke_width)
     return group
 
 
-def render_svg(grid, stroke_width, shading_style, shading_stroke_width):
-    """Render a grid of pipe characters to an SVG string."""
+def draw_tube_directional_shading(drawing, ch, xloc, yloc, light_dir, sw, params,
+                                   pipe_polygon=None, occlusion_polygon=None):
+    """Draw directional hatch marks on the shadow side of a straight tube."""
+    if ch == '|':
+        tangent = (0, 1)
+        normal_left = (-1, 0)
+        normal_right = (1, 0)
+    elif ch == '-':
+        tangent = (1, 0)
+        normal_left = (0, -1)
+        normal_right = (0, 1)
+    else:
+        return
+
+    band_width = params['band_width']
+    band_offset = params['band_offset']
+    spacing = params['spacing']
+    hatch_angle = params['angle']
+    jitter_pos = params['jitter_pos']
+    jitter_angle = params['jitter_angle']
+
+    dot_left = _dot(normal_left, light_dir)
+    dot_right = _dot(normal_right, light_dir)
+    shadow_normal = normal_left if dot_left < dot_right else normal_right
+    band_center_dist = 30 - band_offset - band_width / 2
+
+    # Collect all hatch angles to draw (for crosshatching)
+    angles_to_draw = [hatch_angle]
+    if params.get('crosshatch'):
+        angles_to_draw.append(hatch_angle + params.get('crosshatch_angle', 90))
+
+    num_hatches = int(90 / spacing)
+    for base_angle in angles_to_draw:
+        for i in range(num_hatches + 1):
+            t = -45 + i * (90.0 / num_hatches)
+            t += random.uniform(-jitter_pos, jitter_pos)
+
+            base_x = xloc + tangent[0] * t + shadow_normal[0] * band_center_dist
+            base_y = yloc + tangent[1] * t + shadow_normal[1] * band_center_dist
+
+            angle = base_angle + random.uniform(-jitter_angle, jitter_angle)
+            hatch_dir = _rotate_vec(tangent, angle)
+            half_len = band_width * 0.6
+
+            x1 = base_x - hatch_dir[0] * half_len
+            y1 = base_y - hatch_dir[1] * half_len
+            x2 = base_x + hatch_dir[0] * half_len
+            y2 = base_y + hatch_dir[1] * half_len
+
+            # Clip the line if polygons are provided
+            if pipe_polygon is not None:
+                clipped_lines = clip_line_to_polygon(x1, y1, x2, y2, pipe_polygon, occlusion_polygon)
+                for cx1, cy1, cx2, cy2 in clipped_lines:
+                    drawing.append(draw.Line(cx1, cy1, cx2, cy2,
+                                             stroke='black', stroke_width=sw, fill='none'))
+            else:
+                drawing.append(draw.Line(x1, y1, x2, y2,
+                                         stroke='black', stroke_width=sw, fill='none'))
+
+
+def draw_corner_directional_shading(drawing, ch, xloc, yloc, light_dir, sw, params,
+                                     pipe_polygon=None, occlusion_polygon=None):
+    """Draw directional hatch marks on the shadow portion of a corner piece."""
+    rotations = {'r': 0, '7': 90, 'j': 180, 'L': 270}
+    rot_deg = rotations[ch]
+
+    band_width = params['band_width']
+    band_offset = params['band_offset']
+    hatch_angle = params['angle']
+    jitter_pos = params['jitter_pos']
+    jitter_angle = params['jitter_angle']
+
+    local_center = (40, 40)
+    world_offset = _rotate_vec(local_center, rot_deg)
+    arc_cx = xloc + world_offset[0]
+    arc_cy = yloc + world_offset[1]
+
+    r_outer = 70
+    arc_start = 180 + rot_deg
+    arc_end = 270 + rot_deg
+
+    # Collect all hatch angles to draw (for crosshatching)
+    angles_to_draw = [hatch_angle]
+    if params.get('crosshatch'):
+        angles_to_draw.append(hatch_angle + params.get('crosshatch_angle', 90))
+
+    num_samples = 8
+    for base_angle in angles_to_draw:
+        for i in range(num_samples):
+            frac = (i + 0.5) / num_samples
+            angle_deg = arc_start + frac * (arc_end - arc_start)
+            angle_rad = math.radians(angle_deg)
+
+            outward_normal = (math.cos(angle_rad), math.sin(angle_rad))
+            if _dot(outward_normal, light_dir) >= 0:
+                continue
+
+            band_outer = r_outer - band_offset
+            band_inner = band_outer - band_width
+            band_mid = (band_inner + band_outer) / 2
+
+            base_x = arc_cx + math.cos(angle_rad) * band_mid
+            base_y = arc_cy + math.sin(angle_rad) * band_mid
+
+            # Hatch direction: radial (perpendicular to arc), rotated by hatch_angle
+            angle_jitter = random.uniform(-jitter_angle, jitter_angle)
+            hatch_dir = _rotate_vec(outward_normal, base_angle + angle_jitter)
+            half_len = band_width * 0.6
+
+            # Position jitter uses tangent direction (along the arc)
+            tangent = (-math.sin(angle_rad), math.cos(angle_rad))
+
+            pos_jitter_val = random.uniform(-jitter_pos, jitter_pos)
+            base_x += tangent[0] * pos_jitter_val
+            base_y += tangent[1] * pos_jitter_val
+
+            x1 = base_x - hatch_dir[0] * half_len
+            y1 = base_y - hatch_dir[1] * half_len
+            x2 = base_x + hatch_dir[0] * half_len
+            y2 = base_y + hatch_dir[1] * half_len
+
+            # Clip the line if polygons are provided
+            if pipe_polygon is not None:
+                clipped_lines = clip_line_to_polygon(x1, y1, x2, y2, pipe_polygon, occlusion_polygon)
+                for cx1, cy1, cx2, cy2 in clipped_lines:
+                    drawing.append(draw.Line(cx1, cy1, cx2, cy2,
+                                             stroke='black', stroke_width=sw, fill='none'))
+            else:
+                drawing.append(draw.Line(x1, y1, x2, y2,
+                                         stroke='black', stroke_width=sw, fill='none'))
+
+
+def render_svg(grid, stroke_width, shading_style, shading_stroke_width,
+               light_angle_deg=225, shading_params=None):
+    """Render a grid of pipe characters to an SVG string.
+
+    Args:
+        grid: 2D list of pipe characters
+        stroke_width: width of pipe outlines
+        shading_style: 'none', 'accent', 'hatch', 'double-wall', or 'directional-hatch'
+        shading_stroke_width: width of shading strokes
+        light_angle_deg: light direction in degrees (0=right, 90=down, 180=left, 270=up)
+        shading_params: dict with keys 'band_width', 'band_offset', 'spacing', 'angle',
+                        'jitter_pos', 'jitter_angle'. Uses defaults if None.
+    """
     width = len(grid)
     height = len(grid[0]) if width > 0 else 0
 
@@ -344,12 +661,15 @@ def render_svg(grid, stroke_width, shading_style, shading_stroke_width):
     canvas_h = height * 100
     d = draw.Drawing(canvas_w, canvas_h, origin='center', displayInline=False)
 
-    l_corner = build_corner_tile(stroke_width, shading_style, shading_stroke_width)
-    l_tube = build_tube_tile(stroke_width, shading_style, shading_stroke_width)
+    # For directional-hatch, keep tile groups clean (no baked shading)
+    effective_group_style = 'none' if shading_style == 'directional-hatch' else shading_style
+    l_corner = build_corner_tile(stroke_width, effective_group_style, shading_stroke_width)
+    l_tube = build_tube_tile(stroke_width, effective_group_style, shading_stroke_width)
 
     half_w = width // 2
     half_h = height // 2
 
+    # First pass: tile outlines
     for x in range(width):
         for y in range(height):
             ch = grid[x][y]
@@ -377,5 +697,37 @@ def render_svg(grid, stroke_width, shading_style, shading_stroke_width):
                 else:
                     d.append(draw.Use(l_tube, 0, 0, transform=trans + " rotate(90)"))
                     d.append(draw.Use(l_tube, 0, 0, transform=trans))
+
+    # Second pass: directional shading in world coords
+    if shading_style == 'directional-hatch':
+        params = shading_params if shading_params else DEFAULT_SHADING_PARAMS
+        light_dir = _normalize((math.cos(math.radians(light_angle_deg)),
+                                math.sin(math.radians(light_angle_deg))))
+
+        # Pre-build occlusion polygons for each cell
+        for x in range(width):
+            for y in range(height):
+                ch = grid[x][y]
+                xloc = (x - half_w) * 100
+                yloc = (y - half_h) * 100
+
+                # Build polygons for clipping
+                pipe_poly = get_pipe_polygon(ch, xloc, yloc)
+                occlusion_poly = build_occlusion_polygon(grid, x, y)
+
+                if ch in ('|', '-'):
+                    draw_tube_directional_shading(d, ch, xloc, yloc, light_dir, shading_stroke_width, params,
+                                                  pipe_polygon=pipe_poly, occlusion_polygon=occlusion_poly)
+                elif ch in ('r', '7', 'j', 'L'):
+                    draw_corner_directional_shading(d, ch, xloc, yloc, light_dir, shading_stroke_width, params,
+                                                    pipe_polygon=pipe_poly, occlusion_polygon=occlusion_poly)
+                elif ch == '+':
+                    # Crossover: draw both tube directions
+                    v_poly = get_tube_polygon('|', xloc, yloc)
+                    h_poly = get_tube_polygon('-', xloc, yloc)
+                    draw_tube_directional_shading(d, '|', xloc, yloc, light_dir, shading_stroke_width, params,
+                                                  pipe_polygon=v_poly, occlusion_polygon=occlusion_poly)
+                    draw_tube_directional_shading(d, '-', xloc, yloc, light_dir, shading_stroke_width, params,
+                                                  pipe_polygon=h_poly, occlusion_polygon=occlusion_poly)
 
     return d.as_svg()

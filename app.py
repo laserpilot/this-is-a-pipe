@@ -11,8 +11,8 @@ with st.sidebar:
 
     shading_style = st.selectbox(
         "Shading Style",
-        ['none', 'accent', 'hatch', 'double-wall'],
-        index=1
+        ['none', 'accent', 'hatch', 'double-wall', 'directional-hatch'],
+        index=4  # default to directional-hatch
     )
 
     stroke_width = st.slider("Stroke Width", 0.2, 2.0, 0.5, 0.1)
@@ -23,6 +23,51 @@ with st.sidebar:
         st.caption("Shading stroke: {:.2f}".format(shading_stroke_width))
     else:
         shading_stroke_width = st.slider("Shading Stroke Width", 0.1, 2.0, stroke_width * 0.6, 0.05)
+
+    # Directional shading controls
+    if shading_style == 'directional-hatch':
+        st.header("Light & Hatch Settings")
+        light_angle = st.slider(
+            "Light Angle",
+            0, 360, 225, 5,
+            help="Direction light comes FROM. 0=right, 90=down, 180=left, 270=up. Default 225=top-left."
+        )
+
+        crosshatch = st.checkbox("Enable Crosshatching", value=False,
+                                  help="Add a second set of hatch lines perpendicular to the first")
+
+        with st.expander("Advanced Hatch Parameters"):
+            band_width = st.slider("Band Width", 4, 20, 12, 1,
+                                   help="Width of the shaded band (out of 30 half-pipe-width)")
+            band_offset = st.slider("Band Offset", 0, 10, 3, 1,
+                                    help="Gap from pipe wall to shading band")
+            hatch_spacing = st.slider("Hatch Spacing", 5, 20, 10, 1,
+                                      help="Distance between hatch lines")
+            hatch_angle = st.slider("Hatch Angle", 10, 60, 30, 5,
+                                    help="Angle of hatch lines from pipe direction")
+            jitter_pos = st.slider("Position Jitter", 0.0, 5.0, 1.5, 0.5,
+                                   help="Random offset in hatch position")
+            jitter_angle = st.slider("Angle Jitter", 0.0, 10.0, 3.0, 0.5,
+                                     help="Random rotation of hatch lines")
+            if crosshatch:
+                crosshatch_angle = st.slider("Crosshatch Angle Offset", 45, 135, 90, 5,
+                                             help="Angle offset for second set of hatches")
+            else:
+                crosshatch_angle = 90
+
+        shading_params = {
+            'band_width': band_width,
+            'band_offset': band_offset,
+            'spacing': hatch_spacing,
+            'angle': hatch_angle,
+            'jitter_pos': jitter_pos,
+            'jitter_angle': jitter_angle,
+            'crosshatch': crosshatch,
+            'crosshatch_angle': crosshatch_angle,
+        }
+    else:
+        light_angle = 225
+        shading_params = None
 
     st.header("Grid Settings")
     grid_width = st.slider("Grid Width", 4, 16, 8)
@@ -44,7 +89,10 @@ if 'grid' not in st.session_state or st.session_state.get('grid_dims') != curren
 grid = st.session_state.grid
 
 if grid:
-    svg_string = pipe_core.render_svg(grid, stroke_width, shading_style, shading_stroke_width)
+    svg_string = pipe_core.render_svg(
+        grid, stroke_width, shading_style, shading_stroke_width,
+        light_angle_deg=light_angle, shading_params=shading_params
+    )
     # Make SVG responsive for preview (replace fixed width/height with 100%)
     display_svg = re.sub(r'width="\d+"', 'width="100%"', svg_string, count=1)
     display_svg = re.sub(r'height="\d+"', 'height="100%"', display_svg, count=1)
