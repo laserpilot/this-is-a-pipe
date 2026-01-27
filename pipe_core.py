@@ -166,6 +166,110 @@ def get_corner_polygon(ch, xloc, yloc, num_arc_points=16):
     return unary_union([arc_polygon, v_stub, h_stub])
 
 
+def get_cross_polygon(xloc, yloc):
+    """Return Shapely Polygon for a 4-way cross junction (X).
+
+    Shape: Central square with 4 rectangular arms extending to cell edges.
+    """
+    # Central square (-30, -30) to (30, 30)
+    center = Polygon([
+        (xloc - 30, yloc - 30),
+        (xloc + 30, yloc - 30),
+        (xloc + 30, yloc + 30),
+        (xloc - 30, yloc + 30),
+    ])
+
+    # North arm
+    n_arm = Polygon([
+        (xloc - 30, yloc - 50),
+        (xloc + 30, yloc - 50),
+        (xloc + 30, yloc - 30),
+        (xloc - 30, yloc - 30),
+    ])
+
+    # South arm
+    s_arm = Polygon([
+        (xloc - 30, yloc + 30),
+        (xloc + 30, yloc + 30),
+        (xloc + 30, yloc + 50),
+        (xloc - 30, yloc + 50),
+    ])
+
+    # East arm
+    e_arm = Polygon([
+        (xloc + 30, yloc - 30),
+        (xloc + 50, yloc - 30),
+        (xloc + 50, yloc + 30),
+        (xloc + 30, yloc + 30),
+    ])
+
+    # West arm
+    w_arm = Polygon([
+        (xloc - 50, yloc - 30),
+        (xloc - 30, yloc - 30),
+        (xloc - 30, yloc + 30),
+        (xloc - 50, yloc + 30),
+    ])
+
+    return unary_union([center, n_arm, s_arm, e_arm, w_arm])
+
+
+def get_tee_polygon(ch, xloc, yloc):
+    """Return Shapely Polygon for a 3-way tee junction.
+
+    T = closed south, B = closed north, E = closed west, W = closed east.
+    """
+    rotations = {'T': 0, 'B': 180, 'E': 90, 'W': 270}
+    rot_deg = rotations.get(ch)
+    if rot_deg is None:
+        return None
+
+    def transform_point(px, py):
+        rx, ry = _rotate_vec((px, py), rot_deg)
+        return (xloc + rx, yloc + ry)
+
+    # Base shape (T orientation - closed south):
+    # Central square + 3 arms (N, E, W) + flat bottom at y=+30
+
+    # Central square
+    center_pts = [
+        transform_point(-30, -30),
+        transform_point(30, -30),
+        transform_point(30, 30),
+        transform_point(-30, 30),
+    ]
+    center = Polygon(center_pts)
+
+    # North arm (y = -30 to -50)
+    n_arm_pts = [
+        transform_point(-30, -50),
+        transform_point(30, -50),
+        transform_point(30, -30),
+        transform_point(-30, -30),
+    ]
+    n_arm = Polygon(n_arm_pts)
+
+    # East arm (x = 30 to 50)
+    e_arm_pts = [
+        transform_point(30, -30),
+        transform_point(50, -30),
+        transform_point(50, 30),
+        transform_point(30, 30),
+    ]
+    e_arm = Polygon(e_arm_pts)
+
+    # West arm (x = -50 to -30)
+    w_arm_pts = [
+        transform_point(-50, -30),
+        transform_point(-30, -30),
+        transform_point(-30, 30),
+        transform_point(-50, 30),
+    ]
+    w_arm = Polygon(w_arm_pts)
+
+    return unary_union([center, n_arm, e_arm, w_arm])
+
+
 def get_pipe_polygon(ch, xloc, yloc):
     """Return Shapely Polygon for any pipe segment."""
     if ch in ('|', '-'):
@@ -178,6 +282,10 @@ def get_pipe_polygon(ch, xloc, yloc):
         h = get_tube_polygon('-', xloc, yloc)
         if v and h:
             return unary_union([v, h])
+    elif ch == 'X':
+        return get_cross_polygon(xloc, yloc)
+    elif ch in ('T', 'B', 'E', 'W'):
+        return get_tee_polygon(ch, xloc, yloc)
     return None
 
 
@@ -417,6 +525,98 @@ def draw_corner_outline(drawing, ch, xloc, yloc, occlusion_poly, sw):
     clip_and_draw_line(drawing, x1, y1, x2, y2, occlusion_poly, sw)
 
 
+def draw_cross_outline(drawing, xloc, yloc, occlusion_poly, sw):
+    """Draw outline for a 4-way cross junction (X).
+
+    Shape: Central square with 4 arms. Draw continuous perimeter.
+    """
+    # Draw the cross perimeter as a series of connected line segments
+    # Starting from top-left of north arm, going clockwise
+
+    # North arm - left side (top to inner corner)
+    clip_and_draw_line(drawing, xloc - 30, yloc - 50, xloc - 30, yloc - 30, occlusion_poly, sw)
+    # West arm - top side (inner corner to outer)
+    clip_and_draw_line(drawing, xloc - 30, yloc - 30, xloc - 50, yloc - 30, occlusion_poly, sw)
+    # West arm - left side
+    clip_and_draw_line(drawing, xloc - 50, yloc - 30, xloc - 50, yloc + 30, occlusion_poly, sw)
+    # West arm - bottom side (outer to inner corner)
+    clip_and_draw_line(drawing, xloc - 50, yloc + 30, xloc - 30, yloc + 30, occlusion_poly, sw)
+    # South arm - left side (inner corner to bottom)
+    clip_and_draw_line(drawing, xloc - 30, yloc + 30, xloc - 30, yloc + 50, occlusion_poly, sw)
+    # South arm - bottom side
+    clip_and_draw_line(drawing, xloc - 30, yloc + 50, xloc + 30, yloc + 50, occlusion_poly, sw)
+    # South arm - right side (bottom to inner corner)
+    clip_and_draw_line(drawing, xloc + 30, yloc + 50, xloc + 30, yloc + 30, occlusion_poly, sw)
+    # East arm - bottom side (inner corner to outer)
+    clip_and_draw_line(drawing, xloc + 30, yloc + 30, xloc + 50, yloc + 30, occlusion_poly, sw)
+    # East arm - right side
+    clip_and_draw_line(drawing, xloc + 50, yloc + 30, xloc + 50, yloc - 30, occlusion_poly, sw)
+    # East arm - top side (outer to inner corner)
+    clip_and_draw_line(drawing, xloc + 50, yloc - 30, xloc + 30, yloc - 30, occlusion_poly, sw)
+    # North arm - right side (inner corner to top)
+    clip_and_draw_line(drawing, xloc + 30, yloc - 30, xloc + 30, yloc - 50, occlusion_poly, sw)
+    # North arm - top side
+    clip_and_draw_line(drawing, xloc + 30, yloc - 50, xloc - 30, yloc - 50, occlusion_poly, sw)
+
+
+def draw_tee_outline(drawing, ch, xloc, yloc, occlusion_poly, sw):
+    """Draw outline for a 3-way tee junction.
+
+    T = closed south, B = closed north, E = closed west, W = closed east.
+    """
+    rotations = {'T': 0, 'B': 180, 'E': 90, 'W': 270}
+    rot_deg = rotations.get(ch)
+    if rot_deg is None:
+        return
+
+    def transform_point(px, py):
+        rx, ry = _rotate_vec((px, py), rot_deg)
+        return (xloc + rx, yloc + ry)
+
+    # Base shape (T orientation - closed south):
+    # Draw perimeter clockwise starting from top-left of north arm
+
+    # North arm - left side (top to inner corner)
+    x1, y1 = transform_point(-30, -50)
+    x2, y2 = transform_point(-30, -30)
+    clip_and_draw_line(drawing, x1, y1, x2, y2, occlusion_poly, sw)
+
+    # West arm - top side (inner corner to outer)
+    x1, y1 = transform_point(-30, -30)
+    x2, y2 = transform_point(-50, -30)
+    clip_and_draw_line(drawing, x1, y1, x2, y2, occlusion_poly, sw)
+
+    # West arm - left side
+    x1, y1 = transform_point(-50, -30)
+    x2, y2 = transform_point(-50, 30)
+    clip_and_draw_line(drawing, x1, y1, x2, y2, occlusion_poly, sw)
+
+    # Bottom (closed side) - flat line from west to east
+    x1, y1 = transform_point(-50, 30)
+    x2, y2 = transform_point(50, 30)
+    clip_and_draw_line(drawing, x1, y1, x2, y2, occlusion_poly, sw)
+
+    # East arm - right side
+    x1, y1 = transform_point(50, 30)
+    x2, y2 = transform_point(50, -30)
+    clip_and_draw_line(drawing, x1, y1, x2, y2, occlusion_poly, sw)
+
+    # East arm - top side (outer to inner corner)
+    x1, y1 = transform_point(50, -30)
+    x2, y2 = transform_point(30, -30)
+    clip_and_draw_line(drawing, x1, y1, x2, y2, occlusion_poly, sw)
+
+    # North arm - right side (inner corner to top)
+    x1, y1 = transform_point(30, -30)
+    x2, y2 = transform_point(30, -50)
+    clip_and_draw_line(drawing, x1, y1, x2, y2, occlusion_poly, sw)
+
+    # North arm - top side
+    x1, y1 = transform_point(30, -50)
+    x2, y2 = transform_point(-30, -50)
+    clip_and_draw_line(drawing, x1, y1, x2, y2, occlusion_poly, sw)
+
+
 # ============================================================================
 # PIPE CONNECTION LOGIC
 # ============================================================================
@@ -429,6 +629,12 @@ OPENINGS = {
     '|': {'N', 'S'},
     '-': {'E', 'W'},
     '+': {'N', 'S', 'E', 'W'},
+    # True junctions (pipes actually meet, vs + where they cross over/under)
+    'X': {'N', 'S', 'E', 'W'},  # 4-way cross junction
+    'T': {'N', 'E', 'W'},       # Tee, closed south
+    'B': {'S', 'E', 'W'},       # Tee, closed north
+    'E': {'N', 'S', 'E'},       # Tee, closed west
+    'W': {'N', 'S', 'W'},       # Tee, closed east
 }
 
 ALL_CHARS = set(OPENINGS.keys())
@@ -885,6 +1091,176 @@ def draw_corner_directional_shading(drawing, ch, xloc, yloc, light_dir, sw, para
                             pipe_polygon, occlusion_polygon)
 
 
+def draw_cross_directional_shading(drawing, xloc, yloc, light_dir, sw, params,
+                                    pipe_polygon=None, occlusion_polygon=None):
+    """Draw directional hatch marks on the shadow sides of a cross junction."""
+    band_width = params['band_width']
+    band_offset = params['band_offset']
+    spacing = params['spacing']
+    hatch_angle = params['angle']
+    jitter_pos = params['jitter_pos']
+    jitter_angle = params['jitter_angle']
+    band_width_jitter = params.get('band_width_jitter', 0.0)
+    wiggle = params.get('wiggle', 0.0)
+
+    # Draw shading on each arm based on light direction
+    # Each arm is treated like a tube segment
+
+    arms = [
+        # (arm_direction, tangent, extent_start, extent_end)
+        ('N', (0, -1), -30, -50),  # North arm: y from -30 to -50
+        ('S', (0, 1), 30, 50),     # South arm: y from 30 to 50
+        ('E', (1, 0), 30, 50),     # East arm: x from 30 to 50
+        ('W', (-1, 0), -30, -50),  # West arm: x from -30 to -50
+    ]
+
+    for arm_dir, tangent, start, end in arms:
+        # Determine normals based on arm direction
+        if arm_dir in ('N', 'S'):
+            normal_left = (-1, 0)
+            normal_right = (1, 0)
+        else:  # E, W
+            normal_left = (0, -1)
+            normal_right = (0, 1)
+
+        # Determine shadow side
+        dot_left = _dot(normal_left, light_dir)
+        dot_right = _dot(normal_right, light_dir)
+        shadow_normal = normal_left if dot_left < dot_right else normal_right
+
+        band_center_dist = 30 - band_offset - band_width / 2
+
+        # Calculate arm center and draw hatches
+        arm_length = abs(end - start)
+        num_hatches = max(1, int(arm_length / spacing))
+
+        angles_to_draw = [hatch_angle]
+        if params.get('crosshatch'):
+            angles_to_draw.append(hatch_angle + params.get('crosshatch_angle', 90))
+
+        for base_angle in angles_to_draw:
+            for i in range(num_hatches + 1):
+                t = i / num_hatches
+                pos = start + t * (end - start)
+
+                if arm_dir in ('N', 'S'):
+                    base_x = xloc + shadow_normal[0] * band_center_dist
+                    base_y = yloc + pos
+                else:
+                    base_x = xloc + pos
+                    base_y = yloc + shadow_normal[1] * band_center_dist
+
+                base_x += random.uniform(-jitter_pos, jitter_pos)
+                base_y += random.uniform(-jitter_pos, jitter_pos)
+
+                angle = base_angle + random.uniform(-jitter_angle, jitter_angle)
+                hatch_dir = _rotate_vec(tangent, angle)
+
+                width_mult = 1.0 + random.uniform(-band_width_jitter, band_width_jitter)
+                half_len = (band_width * 0.6) * width_mult
+
+                x1 = base_x - hatch_dir[0] * half_len
+                y1 = base_y - hatch_dir[1] * half_len
+                x2 = base_x + hatch_dir[0] * half_len
+                y2 = base_y + hatch_dir[1] * half_len
+
+                _draw_hatch_line(drawing, x1, y1, x2, y2, hatch_dir, wiggle, sw,
+                                pipe_polygon, occlusion_polygon)
+
+
+def draw_tee_directional_shading(drawing, ch, xloc, yloc, light_dir, sw, params,
+                                  pipe_polygon=None, occlusion_polygon=None):
+    """Draw directional hatch marks on the shadow sides of a tee junction."""
+    rotations = {'T': 0, 'B': 180, 'E': 90, 'W': 270}
+    rot_deg = rotations.get(ch)
+    if rot_deg is None:
+        return
+
+    band_width = params['band_width']
+    band_offset = params['band_offset']
+    spacing = params['spacing']
+    hatch_angle = params['angle']
+    jitter_pos = params['jitter_pos']
+    jitter_angle = params['jitter_angle']
+    band_width_jitter = params.get('band_width_jitter', 0.0)
+    wiggle = params.get('wiggle', 0.0)
+
+    def transform_vec(vx, vy):
+        return _rotate_vec((vx, vy), rot_deg)
+
+    # Base T shape has 3 arms: N, E, W (closed S)
+    # We rotate based on ch
+    base_arms = [
+        ((0, -1), (-30, -50)),   # North arm: y from -30 to -50
+        ((1, 0), (30, 50)),      # East arm: x from 30 to 50
+        ((-1, 0), (-50, -30)),   # West arm: x from -50 to -30
+    ]
+
+    for tangent, (start, end) in base_arms:
+        # Rotate tangent
+        rot_tangent = transform_vec(*tangent)
+
+        # Determine normals (perpendicular to tangent in 2D)
+        if abs(tangent[0]) > 0.5:  # Horizontal arm
+            normal_left = (0, -1)
+            normal_right = (0, 1)
+        else:  # Vertical arm
+            normal_left = (-1, 0)
+            normal_right = (1, 0)
+
+        rot_normal_left = transform_vec(*normal_left)
+        rot_normal_right = transform_vec(*normal_right)
+
+        # Determine shadow side
+        dot_left = _dot(rot_normal_left, light_dir)
+        dot_right = _dot(rot_normal_right, light_dir)
+        shadow_normal = rot_normal_left if dot_left < dot_right else rot_normal_right
+
+        band_center_dist = 30 - band_offset - band_width / 2
+
+        arm_length = abs(end - start)
+        num_hatches = max(1, int(arm_length / spacing))
+
+        angles_to_draw = [hatch_angle]
+        if params.get('crosshatch'):
+            angles_to_draw.append(hatch_angle + params.get('crosshatch_angle', 90))
+
+        for base_angle in angles_to_draw:
+            for i in range(num_hatches + 1):
+                t = i / num_hatches
+                pos = start + t * (end - start)
+
+                # Calculate base position in local coords
+                if abs(tangent[0]) > 0.5:  # Horizontal arm
+                    local_x = pos
+                    local_y = 0
+                else:  # Vertical arm
+                    local_x = 0
+                    local_y = pos
+
+                # Transform to world coords
+                rot_pos = transform_vec(local_x, local_y)
+                base_x = xloc + rot_pos[0] + shadow_normal[0] * band_center_dist
+                base_y = yloc + rot_pos[1] + shadow_normal[1] * band_center_dist
+
+                base_x += random.uniform(-jitter_pos, jitter_pos)
+                base_y += random.uniform(-jitter_pos, jitter_pos)
+
+                angle = base_angle + random.uniform(-jitter_angle, jitter_angle)
+                hatch_dir = _rotate_vec(rot_tangent, angle)
+
+                width_mult = 1.0 + random.uniform(-band_width_jitter, band_width_jitter)
+                half_len = (band_width * 0.6) * width_mult
+
+                x1 = base_x - hatch_dir[0] * half_len
+                y1 = base_y - hatch_dir[1] * half_len
+                x2 = base_x + hatch_dir[0] * half_len
+                y2 = base_y + hatch_dir[1] * half_len
+
+                _draw_hatch_line(drawing, x1, y1, x2, y2, hatch_dir, wiggle, sw,
+                                pipe_polygon, occlusion_polygon)
+
+
 # ============================================================================
 # CLIPPED SHADING FOR OTHER STYLES (accent, hatch, double-wall)
 # ============================================================================
@@ -1052,6 +1428,10 @@ def render_svg(grid, stroke_width, shading_style, shading_stroke_width,
                 draw_tube_outline(d, ch, xloc, yloc, occlusion_poly, stroke_width)
             elif ch in ('r', '7', 'j', 'L'):
                 draw_corner_outline(d, ch, xloc, yloc, occlusion_poly, stroke_width)
+            elif ch == 'X':
+                draw_cross_outline(d, xloc, yloc, occlusion_poly, stroke_width)
+            elif ch in ('T', 'B', 'E', 'W'):
+                draw_tee_outline(d, ch, xloc, yloc, occlusion_poly, stroke_width)
             elif ch == '+':
                 # Crossover: draw with depth ordering (vertical on top of horizontal)
                 v_poly = get_tube_polygon('|', xloc, yloc)
@@ -1084,6 +1464,12 @@ def render_svg(grid, stroke_width, shading_style, shading_stroke_width,
                 elif ch in ('r', '7', 'j', 'L'):
                     draw_corner_directional_shading(d, ch, xloc, yloc, light_dir, shading_stroke_width, params,
                                                     pipe_polygon=pipe_poly, occlusion_polygon=occlusion_poly)
+                elif ch == 'X':
+                    draw_cross_directional_shading(d, xloc, yloc, light_dir, shading_stroke_width, params,
+                                                   pipe_polygon=pipe_poly, occlusion_polygon=occlusion_poly)
+                elif ch in ('T', 'B', 'E', 'W'):
+                    draw_tee_directional_shading(d, ch, xloc, yloc, light_dir, shading_stroke_width, params,
+                                                 pipe_polygon=pipe_poly, occlusion_polygon=occlusion_poly)
                 elif ch == '+':
                     v_poly = get_tube_polygon('|', xloc, yloc)
                     h_poly = get_tube_polygon('-', xloc, yloc)
