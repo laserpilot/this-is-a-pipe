@@ -356,52 +356,64 @@ def draw_corner_outline(drawing, ch, xloc, yloc, occlusion_poly, sw):
     # Draw inner arc (r=10)
     clip_and_draw_arc(drawing, arc_cx, arc_cy, 10, arc_start, arc_end, occlusion_poly, sw)
 
-    # Draw the connector stubs (the rectangular parts that connect to other pipes)
-    # Coordinates match original Rectangle(40,-35,5,70) and Rectangle(-35,40,70,5)
+    # Draw the connector stubs - simple rectangles
+    # Vertical stub: Rectangle(40,-35,5,70) = x:40-45, y:-35 to 35
+    # Horizontal stub: Rectangle(-35,40,70,5) = x:-35 to 35, y:40-45
 
-    # Transform local coords to world coords
     def transform_point(px, py):
         rx, ry = _rotate_vec((px, py), rot_deg)
         return (xloc + rx, yloc + ry)
 
-    # Vertical stub (x=40 to 45, y=-35 to 35)
-    # Inner wall at x=40
+    # Vertical stub rectangle (4 sides)
+    # Left side
     x1, y1 = transform_point(40, -35)
     x2, y2 = transform_point(40, 35)
     clip_and_draw_line(drawing, x1, y1, x2, y2, occlusion_poly, sw)
-
-    # Outer wall at x=45
+    # Right side
     x1, y1 = transform_point(45, -35)
     x2, y2 = transform_point(45, 35)
     clip_and_draw_line(drawing, x1, y1, x2, y2, occlusion_poly, sw)
-
-    # Cap lines for vertical stub (at y=±35)
-    x1, y1 = transform_point(45, 35)
-    x2, y2 = transform_point(50, 35)
+    # Top side
+    x1, y1 = transform_point(40, -35)
+    x2, y2 = transform_point(45, -35)
+    clip_and_draw_line(drawing, x1, y1, x2, y2, occlusion_poly, sw)
+    # Bottom side
+    x1, y1 = transform_point(40, 35)
+    x2, y2 = transform_point(45, 35)
     clip_and_draw_line(drawing, x1, y1, x2, y2, occlusion_poly, sw)
 
-    x1, y1 = transform_point(45, -35)
-    x2, y2 = transform_point(50, -35)
+    # Connecting lines from vertical stub to tile edge (at y=±30)
+    x1, y1 = transform_point(45, 30)
+    x2, y2 = transform_point(50, 30)
+    clip_and_draw_line(drawing, x1, y1, x2, y2, occlusion_poly, sw)
+    x1, y1 = transform_point(45, -30)
+    x2, y2 = transform_point(50, -30)
     clip_and_draw_line(drawing, x1, y1, x2, y2, occlusion_poly, sw)
 
-    # Horizontal stub (x=-35 to 35, y=40 to 45)
-    # Inner wall at y=40
+    # Horizontal stub rectangle (4 sides)
+    # Top side
     x1, y1 = transform_point(-35, 40)
     x2, y2 = transform_point(35, 40)
     clip_and_draw_line(drawing, x1, y1, x2, y2, occlusion_poly, sw)
-
-    # Outer wall at y=45
+    # Bottom side
     x1, y1 = transform_point(-35, 45)
     x2, y2 = transform_point(35, 45)
     clip_and_draw_line(drawing, x1, y1, x2, y2, occlusion_poly, sw)
-
-    # Cap lines for horizontal stub (at x=±35)
-    x1, y1 = transform_point(35, 45)
-    x2, y2 = transform_point(35, 50)
+    # Left side
+    x1, y1 = transform_point(-35, 40)
+    x2, y2 = transform_point(-35, 45)
+    clip_and_draw_line(drawing, x1, y1, x2, y2, occlusion_poly, sw)
+    # Right side
+    x1, y1 = transform_point(35, 40)
+    x2, y2 = transform_point(35, 45)
     clip_and_draw_line(drawing, x1, y1, x2, y2, occlusion_poly, sw)
 
-    x1, y1 = transform_point(-35, 45)
-    x2, y2 = transform_point(-35, 50)
+    # Connecting lines from horizontal stub to tile edge (at x=±30)
+    x1, y1 = transform_point(30, 45)
+    x2, y2 = transform_point(30, 50)
+    clip_and_draw_line(drawing, x1, y1, x2, y2, occlusion_poly, sw)
+    x1, y1 = transform_point(-30, 45)
+    x2, y2 = transform_point(-30, 50)
     clip_and_draw_line(drawing, x1, y1, x2, y2, occlusion_poly, sw)
 
 
