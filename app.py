@@ -37,18 +37,22 @@ with st.sidebar:
                                   help="Add a second set of hatch lines perpendicular to the first")
 
         with st.expander("Advanced Hatch Parameters"):
-            band_width = st.slider("Band Width", 4, 20, 12, 1,
+            band_width = st.slider("Band Width", 1.0, 20.0, 12.0, 0.5,
                                    help="Width of the shaded band (out of 30 half-pipe-width)")
-            band_offset = st.slider("Band Offset", 0, 10, 3, 1,
+            band_offset = st.slider("Band Offset", 0.0, 10.0, 3.0, 0.5,
                                     help="Gap from pipe wall to shading band")
-            hatch_spacing = st.slider("Hatch Spacing", 5, 20, 10, 1,
-                                      help="Distance between hatch lines")
-            hatch_angle = st.slider("Hatch Angle", 10, 60, 30, 5,
+            hatch_spacing = st.slider("Hatch Spacing", 0.1, 20.0, 10.0, 0.1,
+                                      help="Distance between hatch lines (lower = denser)")
+            hatch_angle = st.slider("Hatch Angle", 0, 90, 30, 1,
                                     help="Angle of hatch lines from pipe direction")
-            jitter_pos = st.slider("Position Jitter", 0.0, 5.0, 1.5, 0.5,
+            jitter_pos = st.slider("Position Jitter", 0.0, 5.0, 1.5, 0.1,
                                    help="Random offset in hatch position")
-            jitter_angle = st.slider("Angle Jitter", 0.0, 10.0, 3.0, 0.5,
+            jitter_angle = st.slider("Angle Jitter", 0.0, 10.0, 3.0, 0.1,
                                      help="Random rotation of hatch lines")
+            band_width_jitter = st.slider("Length Jitter", 0.0, 0.5, 0.0, 0.01,
+                                          help="Random variation in hatch length (0-0.5)")
+            wiggle = st.slider("Wiggle", 0.0, 5.0, 0.0, 0.1,
+                               help="Curved/wavy hatches (0 = straight lines)")
             if crosshatch:
                 crosshatch_angle = st.slider("Crosshatch Angle Offset", 45, 135, 90, 5,
                                              help="Angle offset for second set of hatches")
@@ -64,6 +68,8 @@ with st.sidebar:
             'jitter_angle': jitter_angle,
             'crosshatch': crosshatch,
             'crosshatch_angle': crosshatch_angle,
+            'band_width_jitter': band_width_jitter,
+            'wiggle': wiggle,
         }
     else:
         light_angle = 225
