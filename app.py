@@ -76,8 +76,11 @@ with st.sidebar:
         shading_params = None
 
     st.header("Grid Settings")
-    grid_width = st.slider("Grid Width", 4, 16, 8)
-    grid_height = st.slider("Grid Height", 4, 16, 8)
+    grid_width = st.slider("Grid Width", 4, 40, 8)
+    grid_height = st.slider("Grid Height", 4, 40, 8)
+
+    st.header("View Settings")
+    zoom_level = st.slider("Zoom", 25, 200, 100, 5, help="Zoom level (100% = fit to window)")
 
     if st.button("Regenerate Layout", type="primary"):
         st.session_state.pop('grid', None)
@@ -99,10 +102,24 @@ if grid:
         grid, stroke_width, shading_style, shading_stroke_width,
         light_angle_deg=light_angle, shading_params=shading_params
     )
-    # Make SVG responsive for preview (replace fixed width/height with 100%)
+    # Make SVG responsive for display
     display_svg = re.sub(r'width="\d+"', 'width="100%"', svg_string, count=1)
     display_svg = re.sub(r'height="\d+"', 'height="100%"', display_svg, count=1)
-    html_content = '<div style="background:white; padding:10px;">' + display_svg + '</div>'
+
+    # Use viewport-relative sizing for zoom
+    # At 100%, SVG fills nicely; <100% shrinks to see composition; >100% enlarges for detail
+    svg_size = zoom_level
+
+    html_content = f'''
+    <div style="background:#f0f0f0; height:100%; display:flex; align-items:center;
+                justify-content:center; overflow:auto; padding:20px; box-sizing:border-box;">
+        <div style="background:white; padding:10px; box-shadow: 0 2px 8px rgba(0,0,0,0.1);">
+            <div style="width:{svg_size}vmin; height:{svg_size}vmin;">
+                {display_svg}
+            </div>
+        </div>
+    </div>
+    '''
     components.html(html_content, height=700, scrolling=True)
 
     st.download_button(

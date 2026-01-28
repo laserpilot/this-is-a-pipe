@@ -81,19 +81,174 @@ def _draw_hatch_line(drawing, x1, y1, x2, y2, hatch_dir, wiggle, sw,
 # POLYGON CLIPPING HELPERS
 # ============================================================================
 
+# Pipe width parameters: half-width from center to wall
+PIPE_HALF_WIDTHS = {
+    't': 5,   # Tiny (very narrow) - 10 units total width
+    'n': 12,  # Narrow - 24 units total width
+    'm': 30,  # Medium (default) - 60 units total width
+}
+
+
 def get_tube_polygon(ch, xloc, yloc):
     """Return Shapely Polygon for a straight tube segment."""
+    # Determine orientation and width
     if ch == '|':
+        hw = 30  # medium half-width
         return Polygon([
-            (xloc - 30, yloc - 50), (xloc + 30, yloc - 50),
-            (xloc + 30, yloc + 50), (xloc - 30, yloc + 50)
+            (xloc - hw, yloc - 50), (xloc + hw, yloc - 50),
+            (xloc + hw, yloc + 50), (xloc - hw, yloc + 50)
         ])
     elif ch == '-':
+        hw = 30
         return Polygon([
-            (xloc - 50, yloc - 30), (xloc + 50, yloc - 30),
-            (xloc + 50, yloc + 30), (xloc - 50, yloc + 30)
+            (xloc - 50, yloc - hw), (xloc + 50, yloc - hw),
+            (xloc + 50, yloc + hw), (xloc - 50, yloc + hw)
+        ])
+    elif ch == 'i':  # Narrow vertical
+        hw = 12
+        return Polygon([
+            (xloc - hw, yloc - 50), (xloc + hw, yloc - 50),
+            (xloc + hw, yloc + 50), (xloc - hw, yloc + 50)
+        ])
+    elif ch == '=':  # Narrow horizontal
+        hw = 12
+        return Polygon([
+            (xloc - 50, yloc - hw), (xloc + 50, yloc - hw),
+            (xloc + 50, yloc + hw), (xloc - 50, yloc + hw)
+        ])
+    elif ch == '!':  # Tiny vertical
+        hw = 5
+        return Polygon([
+            (xloc - hw, yloc - 50), (xloc + hw, yloc - 50),
+            (xloc + hw, yloc + 50), (xloc - hw, yloc + 50)
+        ])
+    elif ch == '.':  # Tiny horizontal
+        hw = 5
+        return Polygon([
+            (xloc - 50, yloc - hw), (xloc + 50, yloc - hw),
+            (xloc + 50, yloc + hw), (xloc - 50, yloc + hw)
         ])
     return None
+
+
+def get_sized_corner_polygon(ch, xloc, yloc, half_width, num_arc_points=16):
+    """Return Shapely Polygon for a corner arc with specified half-width."""
+    # Map corner chars to rotations
+    base_chars = {'r': 0, '7': 90, 'j': 180, 'L': 270,
+                  'nr': 0, 'n7': 90, 'nj': 180, 'nL': 270,
+                  'tr': 0, 't7': 90, 'tj': 180, 'tL': 270}
+    rot_deg = base_chars.get(ch)
+    if rot_deg is None:
+        return None
+
+    # Arc radii based on half-width - scale proportionally for all pipe sizes
+    inner_radius = half_width / 3
+    center_offset = half_width + inner_radius
+    outer_radius = 2 * half_width + inner_radius
+
+    local_center = (center_offset, center_offset)
+    world_offset = _rotate_vec(local_center, rot_deg)
+    arc_cx = xloc + world_offset[0]
+    arc_cy = yloc + world_offset[1]
+
+    arc_start = 180 + rot_deg
+    arc_end = 270 + rot_deg
+
+    # Build arc polygon
+    arc_points = []
+    for i in range(num_arc_points + 1):
+        frac = i / num_arc_points
+        angle_deg = arc_start + frac * (arc_end - arc_start)
+        angle_rad = math.radians(angle_deg)
+        x = arc_cx + outer_radius * math.cos(angle_rad)
+        y = arc_cy + outer_radius * math.sin(angle_rad)
+        arc_points.append((x, y))
+
+    for i in range(num_arc_points, -1, -1):
+        frac = i / num_arc_points
+        angle_deg = arc_start + frac * (arc_end - arc_start)
+        angle_rad = math.radians(angle_deg)
+        x = arc_cx + inner_radius * math.cos(angle_rad)
+        y = arc_cy + inner_radius * math.sin(angle_rad)
+        arc_points.append((x, y))
+
+    arc_polygon = Polygon(arc_points)
+
+    def transform_point(px, py):
+        rx, ry = _rotate_vec((px, py), rot_deg)
+        return (xloc + rx, yloc + ry)
+
+    # Stub rectangles: connect arc to cell edge
+    # Stub position matches arc inner wall (at half_width from center) to cell edge
+    stub_start = half_width  # Where arc inner wall is (= center_offset - inner_radius)
+    stub_end = 50            # Cell edge
+    stub_extent = half_width * 1.1  # Half-height of stub (proportional to pipe size)
+
+    v_stub_points = [
+        transform_point(stub_start, -stub_extent),
+        transform_point(stub_end, -stub_extent),
+        transform_point(stub_end, stub_extent),
+        transform_point(stub_start, stub_extent),
+    ]
+    v_stub = Polygon(v_stub_points)
+
+    h_stub_points = [
+        transform_point(-stub_extent, stub_start),
+        transform_point(stub_extent, stub_start),
+        transform_point(stub_extent, stub_end),
+        transform_point(-stub_extent, stub_end),
+    ]
+    h_stub = Polygon(h_stub_points)
+
+    return unary_union([arc_polygon, v_stub, h_stub])
+
+
+def get_reducer_polygon(ch, xloc, yloc):
+    """Return Shapely Polygon for a reducer tile (tapers between two sizes)."""
+    # Reducer mapping: start_size, end_size, orientation
+    reducers = {
+        'Rv': ('m', 'n', 'v'),  # Medium top, narrow bottom
+        'RV': ('n', 'm', 'v'),  # Narrow top, medium bottom
+        'Tv': ('n', 't', 'v'),  # Narrow top, tiny bottom
+        'TV': ('t', 'n', 'v'),  # Tiny top, narrow bottom
+        'Rh': ('m', 'n', 'h'),  # Medium right, narrow left
+        'RH': ('n', 'm', 'h'),  # Narrow right, medium left
+        'Th': ('n', 't', 'h'),  # Narrow right, tiny left
+        'TH': ('t', 'n', 'h'),  # Tiny right, narrow left
+    }
+
+    if ch not in reducers:
+        return None
+
+    start_size, end_size, orient = reducers[ch]
+    hw_start = PIPE_HALF_WIDTHS[start_size]
+    hw_end = PIPE_HALF_WIDTHS[end_size]
+
+    if orient == 'v':  # Vertical: tapers along Y axis
+        # Start at top (y=-50), end at bottom (y=+50)
+        # Taper in middle 60 units, straight sections at ends
+        return Polygon([
+            (xloc - hw_start, yloc - 50),
+            (xloc + hw_start, yloc - 50),
+            (xloc + hw_start, yloc - 20),  # Start taper
+            (xloc + hw_end, yloc + 20),    # End taper
+            (xloc + hw_end, yloc + 50),
+            (xloc - hw_end, yloc + 50),
+            (xloc - hw_end, yloc + 20),
+            (xloc - hw_start, yloc - 20),
+        ])
+    else:  # Horizontal: tapers along X axis
+        # Start at right (x=+50), end at left (x=-50)
+        return Polygon([
+            (xloc + 50, yloc - hw_start),
+            (xloc + 50, yloc + hw_start),
+            (xloc + 20, yloc + hw_start),  # Start taper
+            (xloc - 20, yloc + hw_end),    # End taper
+            (xloc - 50, yloc + hw_end),
+            (xloc - 50, yloc - hw_end),
+            (xloc - 20, yloc - hw_end),
+            (xloc + 20, yloc - hw_start),
+        ])
 
 
 def get_corner_polygon(ch, xloc, yloc, num_arc_points=16):
@@ -272,20 +427,41 @@ def get_tee_polygon(ch, xloc, yloc):
 
 def get_pipe_polygon(ch, xloc, yloc):
     """Return Shapely Polygon for any pipe segment."""
-    if ch in ('|', '-'):
+    # Standard tubes (medium, narrow, tiny)
+    if ch in ('|', '-', 'i', '=', '!', '.'):
         return get_tube_polygon(ch, xloc, yloc)
+
+    # Medium corners
     elif ch in ('r', '7', 'j', 'L'):
         return get_corner_polygon(ch, xloc, yloc)
+
+    # Narrow corners
+    elif ch in ('nr', 'n7', 'nj', 'nL'):
+        return get_sized_corner_polygon(ch, xloc, yloc, 12)
+
+    # Tiny corners
+    elif ch in ('tr', 't7', 'tj', 'tL'):
+        return get_sized_corner_polygon(ch, xloc, yloc, 5)
+
+    # Reducers (medium↔narrow and narrow↔tiny)
+    elif ch in ('Rv', 'RV', 'Tv', 'TV', 'Rh', 'RH', 'Th', 'TH'):
+        return get_reducer_polygon(ch, xloc, yloc)
+
+    # Crossover (medium)
     elif ch == '+':
-        # Crossover: union of vertical and horizontal tubes
         v = get_tube_polygon('|', xloc, yloc)
         h = get_tube_polygon('-', xloc, yloc)
         if v and h:
             return unary_union([v, h])
+
+    # Cross junction (medium)
     elif ch == 'X':
         return get_cross_polygon(xloc, yloc)
+
+    # Tee junctions (medium)
     elif ch in ('T', 'B', 'E', 'W'):
         return get_tee_polygon(ch, xloc, yloc)
+
     return None
 
 
@@ -301,8 +477,6 @@ def build_occlusion_polygon(grid, exclude_x, exclude_y, pad=0):
     """
     width = len(grid)
     height = len(grid[0]) if width > 0 else 0
-    half_w = width // 2
-    half_h = height // 2
 
     polygons = []
     for x in range(width):
@@ -310,8 +484,9 @@ def build_occlusion_polygon(grid, exclude_x, exclude_y, pad=0):
             if x == exclude_x and y == exclude_y:
                 continue
             ch = grid[x][y]
-            xloc = (x - half_w) * 100
-            yloc = (y - half_h) * 100
+            # Center the grid properly (works for both odd and even dimensions)
+            xloc = (x - (width - 1) / 2.0) * 100
+            yloc = (y - (height - 1) / 2.0) * 100
             poly = get_pipe_polygon(ch, xloc, yloc)
             if poly is not None:
                 poly = poly.buffer(0)  # Clean any invalid geometry
@@ -431,14 +606,29 @@ def clip_and_draw_arc(drawing, cx, cy, r, start_deg, end_deg, occlusion_poly, sw
 
 def draw_tube_outline(drawing, ch, xloc, yloc, occlusion_poly, sw):
     """Draw a straight tube outline with clipping against other pipes."""
-    if ch == '|':
+    # Determine half-width based on tube type
+    tube_params = {
+        '|': (30, 'v'),   # Medium vertical
+        '-': (30, 'h'),   # Medium horizontal
+        'i': (12, 'v'),   # Narrow vertical
+        '=': (12, 'h'),   # Narrow horizontal
+        '!': (5, 'v'),    # Tiny vertical
+        '.': (5, 'h'),    # Tiny horizontal
+    }
+
+    if ch not in tube_params:
+        return
+
+    hw, orient = tube_params[ch]
+
+    if orient == 'v':
         # Vertical tube: two vertical lines
-        clip_and_draw_line(drawing, xloc - 30, yloc - 50, xloc - 30, yloc + 50, occlusion_poly, sw)
-        clip_and_draw_line(drawing, xloc + 30, yloc - 50, xloc + 30, yloc + 50, occlusion_poly, sw)
-    elif ch == '-':
+        clip_and_draw_line(drawing, xloc - hw, yloc - 50, xloc - hw, yloc + 50, occlusion_poly, sw)
+        clip_and_draw_line(drawing, xloc + hw, yloc - 50, xloc + hw, yloc + 50, occlusion_poly, sw)
+    else:
         # Horizontal tube: two horizontal lines
-        clip_and_draw_line(drawing, xloc - 50, yloc - 30, xloc + 50, yloc - 30, occlusion_poly, sw)
-        clip_and_draw_line(drawing, xloc - 50, yloc + 30, xloc + 50, yloc + 30, occlusion_poly, sw)
+        clip_and_draw_line(drawing, xloc - 50, yloc - hw, xloc + 50, yloc - hw, occlusion_poly, sw)
+        clip_and_draw_line(drawing, xloc - 50, yloc + hw, xloc + 50, yloc + hw, occlusion_poly, sw)
 
 
 def draw_corner_outline(drawing, ch, xloc, yloc, occlusion_poly, sw):
@@ -617,40 +807,227 @@ def draw_tee_outline(drawing, ch, xloc, yloc, occlusion_poly, sw):
     clip_and_draw_line(drawing, x1, y1, x2, y2, occlusion_poly, sw)
 
 
+def draw_sized_corner_outline(drawing, ch, xloc, yloc, half_width, occlusion_poly, sw):
+    """Draw a corner outline with specified half-width."""
+    base_chars = {'r': 0, '7': 90, 'j': 180, 'L': 270,
+                  'nr': 0, 'n7': 90, 'nj': 180, 'nL': 270,
+                  'tr': 0, 't7': 90, 'tj': 180, 'tL': 270}
+    rot_deg = base_chars.get(ch)
+    if rot_deg is None:
+        return
+
+    # Arc radii based on half-width - scale proportionally for all pipe sizes
+    inner_radius = half_width / 3
+    center_offset = half_width + inner_radius
+    outer_radius = 2 * half_width + inner_radius
+
+    local_center = (center_offset, center_offset)
+    world_offset = _rotate_vec(local_center, rot_deg)
+    arc_cx = xloc + world_offset[0]
+    arc_cy = yloc + world_offset[1]
+
+    arc_start = 180 + rot_deg
+    arc_end = 270 + rot_deg
+
+    # Draw arcs
+    clip_and_draw_arc(drawing, arc_cx, arc_cy, outer_radius, arc_start, arc_end, occlusion_poly, sw)
+    clip_and_draw_arc(drawing, arc_cx, arc_cy, inner_radius, arc_start, arc_end, occlusion_poly, sw)
+
+    def transform_point(px, py):
+        rx, ry = _rotate_vec((px, py), rot_deg)
+        return (xloc + rx, yloc + ry)
+
+    # Stub: rectangular fitting that connects arc to cell edge
+    # For smaller pipes, if center_offset > 50, skip stub and just draw connecting lines
+    stub_start = half_width  # Where arc inner wall is (= center_offset - inner_radius)
+    stub_end = min(center_offset + half_width * 0.15, 50)  # Outer edge of stub, capped at cell edge
+    stub_extent = half_width * 1.1  # Half-height of stub (proportional to pipe size)
+
+    # Only draw stub rectangles if there's room (stub_start < stub_end)
+    if stub_start < stub_end:
+        # Vertical stub rectangle (4 sides)
+        x1, y1 = transform_point(stub_start, -stub_extent)
+        x2, y2 = transform_point(stub_start, stub_extent)
+        clip_and_draw_line(drawing, x1, y1, x2, y2, occlusion_poly, sw)
+
+        x1, y1 = transform_point(stub_end, -stub_extent)
+        x2, y2 = transform_point(stub_end, stub_extent)
+        clip_and_draw_line(drawing, x1, y1, x2, y2, occlusion_poly, sw)
+
+        x1, y1 = transform_point(stub_start, -stub_extent)
+        x2, y2 = transform_point(stub_end, -stub_extent)
+        clip_and_draw_line(drawing, x1, y1, x2, y2, occlusion_poly, sw)
+
+        x1, y1 = transform_point(stub_start, stub_extent)
+        x2, y2 = transform_point(stub_end, stub_extent)
+        clip_and_draw_line(drawing, x1, y1, x2, y2, occlusion_poly, sw)
+
+        # Horizontal stub rectangle (4 sides)
+        x1, y1 = transform_point(-stub_extent, stub_start)
+        x2, y2 = transform_point(stub_extent, stub_start)
+        clip_and_draw_line(drawing, x1, y1, x2, y2, occlusion_poly, sw)
+
+        x1, y1 = transform_point(-stub_extent, stub_end)
+        x2, y2 = transform_point(stub_extent, stub_end)
+        clip_and_draw_line(drawing, x1, y1, x2, y2, occlusion_poly, sw)
+
+        x1, y1 = transform_point(-stub_extent, stub_start)
+        x2, y2 = transform_point(-stub_extent, stub_end)
+        clip_and_draw_line(drawing, x1, y1, x2, y2, occlusion_poly, sw)
+
+        x1, y1 = transform_point(stub_extent, stub_start)
+        x2, y2 = transform_point(stub_extent, stub_end)
+        clip_and_draw_line(drawing, x1, y1, x2, y2, occlusion_poly, sw)
+
+    # Connecting lines from stub (or arc) to tile edge (at pipe wall position)
+    connect_start = stub_end if stub_start < stub_end else half_width
+    if connect_start < 50:
+        x1, y1 = transform_point(connect_start, half_width)
+        x2, y2 = transform_point(50, half_width)
+        clip_and_draw_line(drawing, x1, y1, x2, y2, occlusion_poly, sw)
+
+        x1, y1 = transform_point(connect_start, -half_width)
+        x2, y2 = transform_point(50, -half_width)
+        clip_and_draw_line(drawing, x1, y1, x2, y2, occlusion_poly, sw)
+
+        x1, y1 = transform_point(half_width, connect_start)
+        x2, y2 = transform_point(half_width, 50)
+        clip_and_draw_line(drawing, x1, y1, x2, y2, occlusion_poly, sw)
+
+        x1, y1 = transform_point(-half_width, connect_start)
+        x2, y2 = transform_point(-half_width, 50)
+        clip_and_draw_line(drawing, x1, y1, x2, y2, occlusion_poly, sw)
+
+
+def draw_reducer_outline(drawing, ch, xloc, yloc, occlusion_poly, sw):
+    """Draw a reducer pipe outline (tapers between two sizes)."""
+    reducers = {
+        'Rv': ('m', 'n', 'v'),  # Medium top, narrow bottom
+        'RV': ('n', 'm', 'v'),  # Narrow top, medium bottom
+        'Tv': ('n', 't', 'v'),  # Narrow top, tiny bottom
+        'TV': ('t', 'n', 'v'),  # Tiny top, narrow bottom
+        'Rh': ('m', 'n', 'h'),  # Medium right, narrow left
+        'RH': ('n', 'm', 'h'),  # Narrow right, medium left
+        'Th': ('n', 't', 'h'),  # Narrow right, tiny left
+        'TH': ('t', 'n', 'h'),  # Tiny right, narrow left
+    }
+
+    if ch not in reducers:
+        return
+
+    start_size, end_size, orient = reducers[ch]
+    hw_start = PIPE_HALF_WIDTHS[start_size]
+    hw_end = PIPE_HALF_WIDTHS[end_size]
+
+    if orient == 'v':  # Vertical reducer
+        # Left side: from (-hw_start, -50) to (-hw_start, -20) to (-hw_end, 20) to (-hw_end, 50)
+        clip_and_draw_line(drawing, xloc - hw_start, yloc - 50, xloc - hw_start, yloc - 20, occlusion_poly, sw)
+        clip_and_draw_line(drawing, xloc - hw_start, yloc - 20, xloc - hw_end, yloc + 20, occlusion_poly, sw)
+        clip_and_draw_line(drawing, xloc - hw_end, yloc + 20, xloc - hw_end, yloc + 50, occlusion_poly, sw)
+
+        # Right side: mirror
+        clip_and_draw_line(drawing, xloc + hw_start, yloc - 50, xloc + hw_start, yloc - 20, occlusion_poly, sw)
+        clip_and_draw_line(drawing, xloc + hw_start, yloc - 20, xloc + hw_end, yloc + 20, occlusion_poly, sw)
+        clip_and_draw_line(drawing, xloc + hw_end, yloc + 20, xloc + hw_end, yloc + 50, occlusion_poly, sw)
+
+    else:  # Horizontal reducer
+        # Top side
+        clip_and_draw_line(drawing, xloc + 50, yloc - hw_start, xloc + 20, yloc - hw_start, occlusion_poly, sw)
+        clip_and_draw_line(drawing, xloc + 20, yloc - hw_start, xloc - 20, yloc - hw_end, occlusion_poly, sw)
+        clip_and_draw_line(drawing, xloc - 20, yloc - hw_end, xloc - 50, yloc - hw_end, occlusion_poly, sw)
+
+        # Bottom side: mirror
+        clip_and_draw_line(drawing, xloc + 50, yloc + hw_start, xloc + 20, yloc + hw_start, occlusion_poly, sw)
+        clip_and_draw_line(drawing, xloc + 20, yloc + hw_start, xloc - 20, yloc + hw_end, occlusion_poly, sw)
+        clip_and_draw_line(drawing, xloc - 20, yloc + hw_end, xloc - 50, yloc + hw_end, occlusion_poly, sw)
+
+
 # ============================================================================
 # PIPE CONNECTION LOGIC
 # ============================================================================
 
-OPENINGS = {
-    'r': {'S', 'E'},
-    '7': {'S', 'W'},
-    'j': {'N', 'W'},
-    'L': {'N', 'E'},
-    '|': {'N', 'S'},
-    '-': {'E', 'W'},
-    '+': {'N', 'S', 'E', 'W'},
-    # True junctions (pipes actually meet, vs + where they cross over/under)
-    'X': {'N', 'S', 'E', 'W'},  # 4-way cross junction
-    'T': {'N', 'E', 'W'},       # Tee, closed south
-    'B': {'S', 'E', 'W'},       # Tee, closed north
-    'E': {'N', 'S', 'E'},       # Tee, closed west
-    'W': {'N', 'S', 'W'},       # Tee, closed east
+# Port sizes: 't' = tiny (±8), 'n' = narrow (±15), 'm' = medium (±30)
+# None = no opening (closed)
+
+PORTS = {
+    # Medium-width pipes (current default, ±30 walls)
+    'r': {'S': 'm', 'E': 'm'},
+    '7': {'S': 'm', 'W': 'm'},
+    'j': {'N': 'm', 'W': 'm'},
+    'L': {'N': 'm', 'E': 'm'},
+    '|': {'N': 'm', 'S': 'm'},
+    '-': {'E': 'm', 'W': 'm'},
+    '+': {'N': 'm', 'S': 'm', 'E': 'm', 'W': 'm'},
+    'X': {'N': 'm', 'S': 'm', 'E': 'm', 'W': 'm'},
+    'T': {'N': 'm', 'E': 'm', 'W': 'm'},
+    'B': {'S': 'm', 'E': 'm', 'W': 'm'},
+    'E': {'N': 'm', 'S': 'm', 'E': 'm'},
+    'W': {'N': 'm', 'S': 'm', 'W': 'm'},
+
+    # Narrow pipes (±15 walls)
+    'i': {'N': 'n', 'S': 'n'},           # Narrow vertical
+    '=': {'E': 'n', 'W': 'n'},           # Narrow horizontal
+    'nr': {'S': 'n', 'E': 'n'},          # Narrow corner
+    'n7': {'S': 'n', 'W': 'n'},
+    'nj': {'N': 'n', 'W': 'n'},
+    'nL': {'N': 'n', 'E': 'n'},
+
+    # Tiny pipes (±8 walls)
+    '!': {'N': 't', 'S': 't'},           # Tiny vertical
+    '.': {'E': 't', 'W': 't'},           # Tiny horizontal
+    'tr': {'S': 't', 'E': 't'},          # Tiny corner
+    't7': {'S': 't', 'W': 't'},
+    'tj': {'N': 't', 'W': 't'},
+    'tL': {'N': 't', 'E': 't'},
+
+    # Reducers (connect different sizes)
+    # Vertical reducers (medium↔narrow)
+    'Rv': {'N': 'm', 'S': 'n'},          # Medium-to-narrow vertical (medium on top)
+    'RV': {'N': 'n', 'S': 'm'},          # Narrow-to-medium vertical (narrow on top)
+    # Vertical reducers (narrow↔tiny)
+    'Tv': {'N': 'n', 'S': 't'},          # Narrow-to-tiny vertical (narrow on top)
+    'TV': {'N': 't', 'S': 'n'},          # Tiny-to-narrow vertical (tiny on top)
+    # Horizontal reducers (medium↔narrow)
+    'Rh': {'E': 'm', 'W': 'n'},          # Medium-to-narrow horizontal (medium on right)
+    'RH': {'E': 'n', 'W': 'm'},          # Narrow-to-medium horizontal
+    # Horizontal reducers (narrow↔tiny)
+    'Th': {'E': 'n', 'W': 't'},          # Narrow-to-tiny horizontal (narrow on right)
+    'TH': {'E': 't', 'W': 'n'},          # Tiny-to-narrow horizontal
 }
 
-ALL_CHARS = set(OPENINGS.keys())
+ALL_CHARS = set(PORTS.keys())
+
+# Backward compatibility: OPENINGS as set of directions (for code that only needs presence)
+OPENINGS = {ch: set(ports.keys()) for ch, ports in PORTS.items()}
+
+
+def get_port_size(ch, direction):
+    """Get the port size for a tile in a given direction. Returns None if no port."""
+    return PORTS.get(ch, {}).get(direction)
 
 
 def has_opening(ch, direction):
-    return direction in OPENINGS.get(ch, set())
+    """Check if tile has an opening in given direction (any size)."""
+    return get_port_size(ch, direction) is not None
 
 
 def get_compatible_neighbors(ch, direction):
+    """Get all tiles that can connect to ch in the given direction.
+
+    Tiles connect if:
+    - Both have openings in their respective directions (ch.direction, neighbor.opposite)
+    - The port sizes match
+    OR
+    - Neither has an opening (both closed)
+    """
     opposite = {'N': 'S', 'S': 'N', 'E': 'W', 'W': 'E'}
     opp_dir = opposite[direction]
-    ch_has_opening = has_opening(ch, direction)
+    ch_port_size = get_port_size(ch, direction)
     compatible = set()
     for candidate in ALL_CHARS:
-        if ch_has_opening == has_opening(candidate, opp_dir):
+        cand_port_size = get_port_size(candidate, opp_dir)
+        # Both closed (None == None) or both open with same size
+        if ch_port_size == cand_port_size:
             compatible.add(candidate)
     return compatible
 
@@ -961,16 +1338,25 @@ def build_tube_tile(stroke_width, shading_style, shading_stroke_width, use_fills
 def draw_tube_directional_shading(drawing, ch, xloc, yloc, light_dir, sw, params,
                                    pipe_polygon=None, occlusion_polygon=None):
     """Draw directional hatch marks on the shadow side of a straight tube."""
-    if ch == '|':
+    # Determine tube orientation and half-width
+    tube_params = {
+        '|': ('v', 30), '-': ('h', 30),   # Medium
+        'i': ('v', 12), '=': ('h', 12),   # Narrow
+        '!': ('v', 5), '.': ('h', 5),     # Tiny
+    }
+    if ch not in tube_params:
+        return
+
+    orient, half_width = tube_params[ch]
+
+    if orient == 'v':
         tangent = (0, 1)
         normal_left = (-1, 0)
         normal_right = (1, 0)
-    elif ch == '-':
+    else:
         tangent = (1, 0)
         normal_left = (0, -1)
         normal_right = (0, 1)
-    else:
-        return
 
     band_width = params['band_width']
     band_offset = params['band_offset']
@@ -984,7 +1370,7 @@ def draw_tube_directional_shading(drawing, ch, xloc, yloc, light_dir, sw, params
     dot_left = _dot(normal_left, light_dir)
     dot_right = _dot(normal_right, light_dir)
     shadow_normal = normal_left if dot_left < dot_right else normal_right
-    band_center_dist = 30 - band_offset - band_width / 2
+    band_center_dist = half_width - band_offset - band_width / 2
 
     # Collect all hatch angles to draw (for crosshatching)
     angles_to_draw = [hatch_angle]
@@ -1087,6 +1473,172 @@ def draw_corner_directional_shading(drawing, ch, xloc, yloc, light_dir, sw, para
             y2 = base_y + hatch_dir[1] * half_len
 
             # Draw the hatch (with optional wiggle for curved line)
+            _draw_hatch_line(drawing, x1, y1, x2, y2, hatch_dir, wiggle, sw,
+                            pipe_polygon, occlusion_polygon)
+
+
+def draw_sized_corner_directional_shading(drawing, ch, xloc, yloc, half_width, light_dir, sw, params,
+                                          pipe_polygon=None, occlusion_polygon=None):
+    """Draw directional hatch marks on the shadow portion of a sized corner piece."""
+    # Get rotation based on corner type (strip size prefix)
+    base_ch = ch[-1] if ch[0] in ('n', 't') else ch  # 'nr' -> 'r', 'tL' -> 'L'
+    rotations = {'r': 0, '7': 90, 'j': 180, 'L': 270}
+    rot_deg = rotations[base_ch]
+
+    band_width = params['band_width']
+    band_offset = params['band_offset']
+    spacing = params['spacing']
+    hatch_angle = params['angle']
+    jitter_pos = params['jitter_pos']
+    jitter_angle = params['jitter_angle']
+    band_width_jitter = params.get('band_width_jitter', 0.0)
+    wiggle = params.get('wiggle', 0.0)
+
+    # Calculate arc geometry based on half_width (same as get_sized_corner_polygon)
+    inner_radius = half_width / 3
+    center_offset = half_width + inner_radius
+    outer_radius = 2 * half_width + inner_radius
+
+    local_center = (center_offset, center_offset)
+    world_offset = _rotate_vec(local_center, rot_deg)
+    arc_cx = xloc + world_offset[0]
+    arc_cy = yloc + world_offset[1]
+
+    arc_start = 180 + rot_deg
+    arc_end = 270 + rot_deg
+
+    # Collect all hatch angles to draw (for crosshatching)
+    angles_to_draw = [hatch_angle]
+    if params.get('crosshatch'):
+        angles_to_draw.append(hatch_angle + params.get('crosshatch_angle', 90))
+
+    # Calculate num_samples based on spacing (arc length at band_mid radius)
+    band_outer = outer_radius - band_offset
+    band_inner = band_outer - band_width
+    band_mid = (band_inner + band_outer) / 2
+
+    # Clamp band_mid to valid range
+    band_mid = max(inner_radius + 1, min(band_mid, outer_radius - 1))
+
+    arc_length = (math.pi / 2) * band_mid  # 90 degrees of arc
+    num_samples = max(4, int(arc_length / spacing))
+
+    for base_angle in angles_to_draw:
+        for i in range(num_samples):
+            frac = (i + 0.5) / num_samples
+            angle_deg = arc_start + frac * (arc_end - arc_start)
+            angle_rad = math.radians(angle_deg)
+
+            outward_normal = (math.cos(angle_rad), math.sin(angle_rad))
+            if _dot(outward_normal, light_dir) >= 0:
+                continue
+
+            base_x = arc_cx + math.cos(angle_rad) * band_mid
+            base_y = arc_cy + math.sin(angle_rad) * band_mid
+
+            # Hatch direction: radial (perpendicular to arc), rotated by hatch_angle
+            angle_jitter = random.uniform(-jitter_angle, jitter_angle)
+            hatch_dir = _rotate_vec(outward_normal, base_angle + angle_jitter)
+
+            # Apply band width jitter
+            width_mult = 1.0 + random.uniform(-band_width_jitter, band_width_jitter)
+            half_len = (band_width * 0.6) * width_mult
+
+            # Position jitter uses tangent direction (along the arc)
+            tangent = (-math.sin(angle_rad), math.cos(angle_rad))
+
+            pos_jitter_val = random.uniform(-jitter_pos, jitter_pos)
+            base_x += tangent[0] * pos_jitter_val
+            base_y += tangent[1] * pos_jitter_val
+
+            x1 = base_x - hatch_dir[0] * half_len
+            y1 = base_y - hatch_dir[1] * half_len
+            x2 = base_x + hatch_dir[0] * half_len
+            y2 = base_y + hatch_dir[1] * half_len
+
+            _draw_hatch_line(drawing, x1, y1, x2, y2, hatch_dir, wiggle, sw,
+                            pipe_polygon, occlusion_polygon)
+
+
+def draw_reducer_directional_shading(drawing, ch, xloc, yloc, light_dir, sw, params,
+                                     pipe_polygon=None, occlusion_polygon=None):
+    """Draw directional hatch marks on the shadow side of a reducer tile."""
+    # Reducer parameters
+    reducer_info = {
+        # Vertical reducers (N-S orientation)
+        'Rv': ('v', 30, 12),   # Medium (N) to Narrow (S)
+        'RV': ('v', 12, 30),   # Narrow (N) to Medium (S)
+        'Tv': ('v', 12, 5),    # Narrow (N) to Tiny (S)
+        'TV': ('v', 5, 12),    # Tiny (N) to Narrow (S)
+        # Horizontal reducers (E-W orientation)
+        'Rh': ('h', 30, 12),   # Medium (E) to Narrow (W)
+        'RH': ('h', 12, 30),   # Narrow (E) to Medium (W)
+        'Th': ('h', 12, 5),    # Narrow (E) to Tiny (W)
+        'TH': ('h', 5, 12),    # Tiny (E) to Narrow (W)
+    }
+    if ch not in reducer_info:
+        return
+
+    orient, hw_start, hw_end = reducer_info[ch]
+
+    band_width = params['band_width']
+    band_offset = params['band_offset']
+    spacing = params['spacing']
+    hatch_angle = params['angle']
+    jitter_pos = params['jitter_pos']
+    jitter_angle = params['jitter_angle']
+    band_width_jitter = params.get('band_width_jitter', 0.0)
+    wiggle = params.get('wiggle', 0.0)
+
+    if orient == 'v':
+        tangent = (0, 1)
+        normal_left = (-1, 0)
+        normal_right = (1, 0)
+    else:
+        tangent = (1, 0)
+        normal_left = (0, -1)
+        normal_right = (0, 1)
+
+    dot_left = _dot(normal_left, light_dir)
+    dot_right = _dot(normal_right, light_dir)
+    shadow_normal = normal_left if dot_left < dot_right else normal_right
+
+    # Collect all hatch angles to draw (for crosshatching)
+    angles_to_draw = [hatch_angle]
+    if params.get('crosshatch'):
+        angles_to_draw.append(hatch_angle + params.get('crosshatch_angle', 90))
+
+    num_hatches = int(90 / spacing)
+    for base_angle in angles_to_draw:
+        for i in range(num_hatches + 1):
+            # t goes from -45 to +45 along the cell
+            t = -45 + i * (90.0 / num_hatches)
+
+            # Interpolate half_width along the reducer
+            frac = (t + 45) / 90.0  # 0 at start, 1 at end
+            half_width = hw_start + frac * (hw_end - hw_start)
+
+            band_center_dist = half_width - band_offset - band_width / 2
+            # Clamp to valid range
+            band_center_dist = max(1, band_center_dist)
+
+            t_jittered = t + random.uniform(-jitter_pos, jitter_pos)
+
+            base_x = xloc + tangent[0] * t_jittered + shadow_normal[0] * band_center_dist
+            base_y = yloc + tangent[1] * t_jittered + shadow_normal[1] * band_center_dist
+
+            angle = base_angle + random.uniform(-jitter_angle, jitter_angle)
+            hatch_dir = _rotate_vec(tangent, angle)
+
+            # Apply band width jitter
+            width_mult = 1.0 + random.uniform(-band_width_jitter, band_width_jitter)
+            half_len = (band_width * 0.6) * width_mult
+
+            x1 = base_x - hatch_dir[0] * half_len
+            y1 = base_y - hatch_dir[1] * half_len
+            x2 = base_x + hatch_dir[0] * half_len
+            y2 = base_y + hatch_dir[1] * half_len
+
             _draw_hatch_line(drawing, x1, y1, x2, y2, hatch_dir, wiggle, sw,
                             pipe_polygon, occlusion_polygon)
 
@@ -1407,9 +1959,6 @@ def render_svg(grid, stroke_width, shading_style, shading_stroke_width,
     canvas_h = height * 100
     d = draw.Drawing(canvas_w, canvas_h, origin='center', displayInline=False)
 
-    half_w = width // 2
-    half_h = height // 2
-
     # Calculate padding for stroke width (prevents visual overlap at boundaries)
     pad = max(stroke_width, shading_stroke_width) * 0.5 + 0.1
 
@@ -1417,17 +1966,24 @@ def render_svg(grid, stroke_width, shading_style, shading_stroke_width,
     for x in range(width):
         for y in range(height):
             ch = grid[x][y]
-            xloc = (x - half_w) * 100
-            yloc = (y - half_h) * 100
+            # Center the grid properly (works for both odd and even dimensions)
+            xloc = (x - (width - 1) / 2.0) * 100
+            yloc = (y - (height - 1) / 2.0) * 100
 
             # Build occlusion polygon (all other pipes, buffered for stroke width)
             occlusion_poly = build_occlusion_polygon(grid, x, y, pad=pad)
 
             # Draw pipe outlines with clipping
-            if ch in ('|', '-'):
+            if ch in ('|', '-', 'i', '=', '!', '.'):
                 draw_tube_outline(d, ch, xloc, yloc, occlusion_poly, stroke_width)
             elif ch in ('r', '7', 'j', 'L'):
                 draw_corner_outline(d, ch, xloc, yloc, occlusion_poly, stroke_width)
+            elif ch in ('nr', 'n7', 'nj', 'nL'):
+                draw_sized_corner_outline(d, ch, xloc, yloc, 12, occlusion_poly, stroke_width)
+            elif ch in ('tr', 't7', 'tj', 'tL'):
+                draw_sized_corner_outline(d, ch, xloc, yloc, 5, occlusion_poly, stroke_width)
+            elif ch in ('Rv', 'RV', 'Tv', 'TV', 'Rh', 'RH', 'Th', 'TH'):
+                draw_reducer_outline(d, ch, xloc, yloc, occlusion_poly, stroke_width)
             elif ch == 'X':
                 draw_cross_outline(d, xloc, yloc, occlusion_poly, stroke_width)
             elif ch in ('T', 'B', 'E', 'W'):
@@ -1458,12 +2014,22 @@ def render_svg(grid, stroke_width, shading_style, shading_stroke_width,
                 if pipe_poly:
                     pipe_poly = pipe_poly.buffer(0)  # Clean geometry
 
-                if ch in ('|', '-'):
+                if ch in ('|', '-', 'i', '=', '!', '.'):
+                    # All tube types use same shading logic (with different polygons)
                     draw_tube_directional_shading(d, ch, xloc, yloc, light_dir, shading_stroke_width, params,
                                                   pipe_polygon=pipe_poly, occlusion_polygon=occlusion_poly)
                 elif ch in ('r', '7', 'j', 'L'):
                     draw_corner_directional_shading(d, ch, xloc, yloc, light_dir, shading_stroke_width, params,
                                                     pipe_polygon=pipe_poly, occlusion_polygon=occlusion_poly)
+                elif ch in ('nr', 'n7', 'nj', 'nL'):
+                    draw_sized_corner_directional_shading(d, ch, xloc, yloc, 12, light_dir, shading_stroke_width, params,
+                                                          pipe_polygon=pipe_poly, occlusion_polygon=occlusion_poly)
+                elif ch in ('tr', 't7', 'tj', 'tL'):
+                    draw_sized_corner_directional_shading(d, ch, xloc, yloc, 5, light_dir, shading_stroke_width, params,
+                                                          pipe_polygon=pipe_poly, occlusion_polygon=occlusion_poly)
+                elif ch in ('Rv', 'RV', 'Tv', 'TV', 'Rh', 'RH', 'Th', 'TH'):
+                    draw_reducer_directional_shading(d, ch, xloc, yloc, light_dir, shading_stroke_width, params,
+                                                     pipe_polygon=pipe_poly, occlusion_polygon=occlusion_poly)
                 elif ch == 'X':
                     draw_cross_directional_shading(d, xloc, yloc, light_dir, shading_stroke_width, params,
                                                    pipe_polygon=pipe_poly, occlusion_polygon=occlusion_poly)
