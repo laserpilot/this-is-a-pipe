@@ -230,7 +230,7 @@ def get_reducer_polygon(ch, xloc, yloc):
     # Flange dimensions (must match draw_reducer_flanges)
     flange_start = hw_start * 0.15
     flange_end = hw_end * 0.15
-    flange_width = 3
+    flange_width = 2
 
     if orient == 'v':  # Vertical: tapers along Y axis
         # Main pipe body
@@ -877,7 +877,7 @@ def draw_sized_corner_outline(drawing, ch, xloc, yloc, half_width, occlusion_pol
     # Stub: rectangular fitting that connects arc to cell edge
     # For smaller pipes, if center_offset > 50, skip stub and just draw connecting lines
     stub_start = half_width  # Where arc inner wall is (= center_offset - inner_radius)
-    stub_end = min(center_offset + half_width * 0.15, 50)  # Outer edge of stub, capped at cell edge
+    stub_end = min((center_offset -2 )+ half_width * 0.15, 50)  # Outer edge of stub, capped at cell edge
     stub_extent = half_width * 1.1  # Half-height of stub (proportional to pipe size)
 
     # Only draw stub rectangles if there's room (stub_start < stub_end)
@@ -963,7 +963,7 @@ def draw_reducer_outline(drawing, ch, xloc, yloc, occlusion_poly, sw):
     # Flange dimensions (must match get_reducer_polygon)
     flange_start = hw_start * 0.15
     flange_end = hw_end * 0.15
-    flange_width = 3
+    flange_width = 2
 
     # Build flange polygons for self-clipping
     if orient == 'v':
@@ -1119,6 +1119,55 @@ ALL_CHARS = set(PORTS.keys())
 
 # Backward compatibility: OPENINGS as set of directions (for code that only needs presence)
 OPENINGS = {ch: set(ports.keys()) for ch, ports in PORTS.items()}
+
+# Tile category mappings for weight system
+TILE_SIZE = {}
+for _ch in ['|', '-', 'r', '7', 'j', 'L', '+', 'X', 'T', 'B', 'E', 'W']:
+    TILE_SIZE[_ch] = 'medium'
+for _ch in ['i', '=', 'nr', 'n7', 'nj', 'nL']:
+    TILE_SIZE[_ch] = 'narrow'
+for _ch in ['!', '.', 'tr', 't7', 'tj', 'tL']:
+    TILE_SIZE[_ch] = 'tiny'
+for _ch in ['Rv', 'RV', 'Rh', 'RH']:
+    TILE_SIZE[_ch] = 'reducer_mn'
+for _ch in ['Tv', 'TV', 'Th', 'TH']:
+    TILE_SIZE[_ch] = 'reducer_nt'
+
+TILE_SHAPE = {}
+for _ch in ['|', '-', 'i', '=', '!', '.']:
+    TILE_SHAPE[_ch] = 'straight'
+for _ch in ['r', '7', 'j', 'L', 'nr', 'n7', 'nj', 'nL', 'tr', 't7', 'tj', 'tL']:
+    TILE_SHAPE[_ch] = 'corner'
+for _ch in ['+', 'X', 'T', 'B', 'E', 'W']:
+    TILE_SHAPE[_ch] = 'junction'
+for _ch in ['Rv', 'RV', 'Rh', 'RH', 'Tv', 'TV', 'Th', 'TH']:
+    TILE_SHAPE[_ch] = 'reducer'
+
+
+def get_tile_weight(ch, tile_weights):
+    """Calculate tile weight from size and shape multipliers."""
+    if tile_weights is None:
+        if ch == '+':
+            return 2
+        elif ch in 'r7jL':
+            return 3
+        return 1
+
+    size_weights = tile_weights.get('size', {})
+    shape_weights = tile_weights.get('shape', {})
+
+    size_cat = TILE_SIZE.get(ch, 'medium')
+    if size_cat == 'reducer_mn':
+        s = (size_weights.get('medium', 1.0) + size_weights.get('narrow', 1.0)) / 2
+    elif size_cat == 'reducer_nt':
+        s = (size_weights.get('narrow', 1.0) + size_weights.get('tiny', 1.0)) / 2
+    else:
+        s = size_weights.get(size_cat, 1.0)
+
+    shape_cat = TILE_SHAPE.get(ch, 'straight')
+    h = shape_weights.get(shape_cat, 1.0)
+
+    return s * h
 
 
 def get_port_size(ch, direction):
@@ -1294,24 +1343,18 @@ def find_min_entropy_cell(poss_grid, width, height):
     return None
 
 
-def collapse_cell(poss_grid, x, y):
+def collapse_cell(poss_grid, x, y, tile_weights=None):
     possibilities = list(poss_grid[x][y])
     if possibilities:
-        weights = []
-        for ch in possibilities:
-            if ch == '+':
-                weights.append(2)
-            elif ch in 'r7jL':
-                weights.append(3)
-            else:
-                weights.append(1)
+        weights = [get_tile_weight(ch, tile_weights) for ch in possibilities]
         chosen = random.choices(possibilities, weights=weights, k=1)[0]
         poss_grid[x][y] = {chosen}
         return True
     return False
 
 
-def wave_function_collapse(width, height, max_iterations=10000, max_attempts=20):
+def wave_function_collapse(width, height, tile_weights=None,
+                           max_iterations=10000, max_attempts=20):
     """Run WFC and return a 2D grid of pipe characters, or None on failure."""
     for attempt in range(1, max_attempts + 1):
         poss_grid = create_possibility_grid(width, height)
@@ -1333,7 +1376,7 @@ def wave_function_collapse(width, height, max_iterations=10000, max_attempts=20)
                 break
 
             x, y = cell
-            if not collapse_cell(poss_grid, x, y):
+            if not collapse_cell(poss_grid, x, y, tile_weights):
                 contradiction = True
                 break
 

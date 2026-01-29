@@ -75,6 +75,23 @@ with st.sidebar:
         light_angle = 225
         shading_params = None
 
+    st.header("Tile Weights")
+    with st.expander("Pipe Size Weights"):
+        w_medium = st.slider("Medium", 0.1, 5.0, 1.0, 0.1)
+        w_narrow = st.slider("Narrow", 0.1, 5.0, 1.0, 0.1)
+        w_tiny = st.slider("Tiny", 0.1, 5.0, 1.0, 0.1)
+    with st.expander("Shape Weights"):
+        w_straight = st.slider("Straights", 0.1, 5.0, 1.0, 0.1)
+        w_corner = st.slider("Corners", 0.1, 5.0, 3.0, 0.1)
+        w_junction = st.slider("Junctions", 0.1, 5.0, 2.0, 0.1)
+        w_reducer = st.slider("Reducers", 0.1, 5.0, 1.0, 0.1)
+
+    tile_weights = {
+        'size': {'medium': w_medium, 'narrow': w_narrow, 'tiny': w_tiny},
+        'shape': {'straight': w_straight, 'corner': w_corner,
+                  'junction': w_junction, 'reducer': w_reducer},
+    }
+
     st.header("Grid Settings")
     grid_width = st.slider("Grid Width", 4, 40, 8)
     grid_height = st.slider("Grid Height", 4, 40, 8)
@@ -91,7 +108,8 @@ current_dims = (grid_width, grid_height)
 
 if 'grid' not in st.session_state or st.session_state.get('grid_dims') != current_dims:
     with st.spinner("Generating pipe layout..."):
-        grid = pipe_core.wave_function_collapse(grid_width, grid_height)
+        grid = pipe_core.wave_function_collapse(grid_width, grid_height,
+                                                 tile_weights=tile_weights)
         st.session_state.grid = grid
         st.session_state.grid_dims = current_dims
 
