@@ -179,10 +179,10 @@ def get_sized_corner_polygon(ch, xloc, yloc, half_width, num_arc_points=16):
         return (xloc + rx, yloc + ry)
 
     # Stub rectangles: connect arc to cell edge
-    # Stub position matches arc inner wall (at half_width from center) to cell edge
-    stub_start = half_width  # Where arc inner wall is (= center_offset - inner_radius)
-    stub_end = 50            # Cell edge
-    stub_extent = half_width * 1.1  # Half-height of stub (proportional to pipe size)
+    # Match medium corner proportions: stub starts at arc center (center_offset)
+    stub_start = center_offset
+    stub_end = 50
+    stub_extent = outer_radius / 2
 
     v_stub_points = [
         transform_point(stub_start, -stub_extent),
@@ -484,12 +484,14 @@ def get_pipe_polygon(ch, xloc, yloc):
     elif ch in ('Rv', 'RV', 'Tv', 'TV', 'Rh', 'RH', 'Th', 'TH'):
         return get_reducer_polygon(ch, xloc, yloc)
 
-    # Crossover (medium)
-    elif ch == '+':
-        v = get_tube_polygon('|', xloc, yloc)
-        h = get_tube_polygon('-', xloc, yloc)
+    # Crossovers (all sizes)
+    elif ch in CROSSOVER_TUBES:
+        v_ch, h_ch = CROSSOVER_TUBES[ch]
+        v = get_tube_polygon(v_ch, xloc, yloc)
+        h = get_tube_polygon(h_ch, xloc, yloc)
         if v and h:
             return unary_union([v, h])
+        return v or h
 
     # Cross junction (medium)
     elif ch == 'X':
@@ -875,10 +877,11 @@ def draw_sized_corner_outline(drawing, ch, xloc, yloc, half_width, occlusion_pol
         return (xloc + rx, yloc + ry)
 
     # Stub: rectangular fitting that connects arc to cell edge
-    # For smaller pipes, if center_offset > 50, skip stub and just draw connecting lines
-    stub_start = half_width  # Where arc inner wall is (= center_offset - inner_radius)
-    stub_end = min((center_offset -2 )+ half_width * 0.15, 50)  # Outer edge of stub, capped at cell edge
-    stub_extent = half_width * 1.1  # Half-height of stub (proportional to pipe size)
+    # Match medium corner proportions: stub starts at arc center (center_offset),
+    # giving inner_radius of gap between inner arc and stub
+    stub_start = center_offset
+    stub_end = min(center_offset + inner_radius * 0.5, 50)
+    stub_extent = outer_radius / 2
 
     # Only draw stub rectangles if there's room (stub_start < stub_end)
     if stub_start < stub_end:
@@ -1078,6 +1081,16 @@ PORTS = {
     '|': {'N': 'm', 'S': 'm'},
     '-': {'E': 'm', 'W': 'm'},
     '+': {'N': 'm', 'S': 'm', 'E': 'm', 'W': 'm'},
+    # Crossovers: same-size
+    '+n': {'N': 'n', 'S': 'n', 'E': 'n', 'W': 'n'},
+    '+t': {'N': 't', 'S': 't', 'E': 't', 'W': 't'},
+    # Crossovers: mixed-size (first=vertical/top, second=horizontal/bottom)
+    '+mn': {'N': 'm', 'S': 'm', 'E': 'n', 'W': 'n'},
+    '+nm': {'N': 'n', 'S': 'n', 'E': 'm', 'W': 'm'},
+    '+mt': {'N': 'm', 'S': 'm', 'E': 't', 'W': 't'},
+    '+tm': {'N': 't', 'S': 't', 'E': 'm', 'W': 'm'},
+    '+nt': {'N': 'n', 'S': 'n', 'E': 't', 'W': 't'},
+    '+tn': {'N': 't', 'S': 't', 'E': 'n', 'W': 'n'},
     'X': {'N': 'm', 'S': 'm', 'E': 'm', 'W': 'm'},
     'T': {'N': 'm', 'E': 'm', 'W': 'm'},
     'B': {'S': 'm', 'E': 'm', 'W': 'm'},
@@ -1132,22 +1145,46 @@ for _ch in ['Rv', 'RV', 'Rh', 'RH']:
     TILE_SIZE[_ch] = 'reducer_mn'
 for _ch in ['Tv', 'TV', 'Th', 'TH']:
     TILE_SIZE[_ch] = 'reducer_nt'
+# Crossover size categories
+TILE_SIZE['+n'] = 'narrow'
+TILE_SIZE['+t'] = 'tiny'
+for _ch in ['+mn', '+nm']:
+    TILE_SIZE[_ch] = 'reducer_mn'
+for _ch in ['+mt', '+tm']:
+    TILE_SIZE[_ch] = 'crossover_mt'
+for _ch in ['+nt', '+tn']:
+    TILE_SIZE[_ch] = 'reducer_nt'
 
 TILE_SHAPE = {}
 for _ch in ['|', '-', 'i', '=', '!', '.']:
     TILE_SHAPE[_ch] = 'straight'
 for _ch in ['r', '7', 'j', 'L', 'nr', 'n7', 'nj', 'nL', 'tr', 't7', 'tj', 'tL']:
     TILE_SHAPE[_ch] = 'corner'
-for _ch in ['+', 'X', 'T', 'B', 'E', 'W']:
+for _ch in ['+', '+n', '+t', '+mn', '+nm', '+mt', '+tm', '+nt', '+tn',
+            'X', 'T', 'B', 'E', 'W']:
     TILE_SHAPE[_ch] = 'junction'
 for _ch in ['Rv', 'RV', 'Rh', 'RH', 'Tv', 'TV', 'Th', 'TH']:
     TILE_SHAPE[_ch] = 'reducer'
+
+# Crossover tile → (vertical_tube_char, horizontal_tube_char)
+# Vertical tube is drawn on top, horizontal underneath
+CROSSOVER_TUBES = {
+    '+':   ('|', '-'),
+    '+n':  ('i', '='),
+    '+t':  ('!', '.'),
+    '+mn': ('|', '='),
+    '+nm': ('i', '-'),
+    '+mt': ('|', '.'),
+    '+tm': ('!', '-'),
+    '+nt': ('i', '.'),
+    '+tn': ('!', '='),
+}
 
 
 def get_tile_weight(ch, tile_weights):
     """Calculate tile weight from size and shape multipliers."""
     if tile_weights is None:
-        if ch == '+':
+        if ch in CROSSOVER_TUBES:
             return 2
         elif ch in 'r7jL':
             return 3
@@ -1161,6 +1198,8 @@ def get_tile_weight(ch, tile_weights):
         s = (size_weights.get('medium', 1.0) + size_weights.get('narrow', 1.0)) / 2
     elif size_cat == 'reducer_nt':
         s = (size_weights.get('narrow', 1.0) + size_weights.get('tiny', 1.0)) / 2
+    elif size_cat == 'crossover_mt':
+        s = (size_weights.get('medium', 1.0) + size_weights.get('tiny', 1.0)) / 2
     else:
         s = size_weights.get(size_cat, 1.0)
 
@@ -1521,14 +1560,16 @@ def draw_tube_directional_shading(drawing, ch, xloc, yloc, light_dir, sw, params
         normal_left = (0, -1)
         normal_right = (0, 1)
 
-    band_width = params['band_width']
-    band_offset = params['band_offset']
-    spacing = params['spacing']
+    # Scale hatch params proportionally to pipe size (tuned for medium hw=30)
+    scale = half_width / 30
+    band_width = params['band_width'] * scale
+    band_offset = params['band_offset'] * scale
+    spacing = params['spacing'] * scale
     hatch_angle = params['angle']
-    jitter_pos = params['jitter_pos']
+    jitter_pos = params['jitter_pos'] * scale
     jitter_angle = params['jitter_angle']
     band_width_jitter = params.get('band_width_jitter', 0.0)
-    wiggle = params.get('wiggle', 0.0)
+    wiggle = params.get('wiggle', 0.0) * scale
 
     dot_left = _dot(normal_left, light_dir)
     dot_right = _dot(normal_right, light_dir)
@@ -1540,7 +1581,7 @@ def draw_tube_directional_shading(drawing, ch, xloc, yloc, light_dir, sw, params
     if params.get('crosshatch'):
         angles_to_draw.append(hatch_angle + params.get('crosshatch_angle', 90))
 
-    num_hatches = int(90 / spacing)
+    num_hatches = max(1, int(90 / spacing))
     for base_angle in angles_to_draw:
         for i in range(num_hatches + 1):
             t = -45 + i * (90.0 / num_hatches)
@@ -1648,14 +1689,16 @@ def draw_sized_corner_directional_shading(drawing, ch, xloc, yloc, half_width, l
     rotations = {'r': 0, '7': 90, 'j': 180, 'L': 270}
     rot_deg = rotations[base_ch]
 
-    band_width = params['band_width']
-    band_offset = params['band_offset']
-    spacing = params['spacing']
+    # Scale hatch params proportionally to pipe size (tuned for medium hw=30)
+    scale = half_width / 30
+    band_width = params['band_width'] * scale
+    band_offset = params['band_offset'] * scale
+    spacing = params['spacing'] * scale
     hatch_angle = params['angle']
-    jitter_pos = params['jitter_pos']
+    jitter_pos = params['jitter_pos'] * scale
     jitter_angle = params['jitter_angle']
     band_width_jitter = params.get('band_width_jitter', 0.0)
-    wiggle = params.get('wiggle', 0.0)
+    wiggle = params.get('wiggle', 0.0) * scale
 
     # Calculate arc geometry based on half_width (same as get_sized_corner_polygon)
     inner_radius = half_width / 3
@@ -1725,33 +1768,31 @@ def draw_sized_corner_directional_shading(drawing, ch, xloc, yloc, half_width, l
 
 def draw_reducer_directional_shading(drawing, ch, xloc, yloc, light_dir, sw, params,
                                      pipe_polygon=None, occlusion_polygon=None):
-    """Draw directional hatch marks on the shadow side of a reducer tile."""
-    # Reducer parameters
+    """Draw directional hatch marks on the shadow side of a reducer tile.
+
+    The reducer has three sections: straight start, taper, straight end.
+    Hatches follow the wall angle in the taper section and scale proportionally
+    to the local pipe size.
+    """
     reducer_info = {
-        # Vertical reducers (N-S orientation)
-        'Rv': ('v', 30, 12),   # Medium (N) to Narrow (S)
-        'RV': ('v', 12, 30),   # Narrow (N) to Medium (S)
-        'Tv': ('v', 12, 5),    # Narrow (N) to Tiny (S)
-        'TV': ('v', 5, 12),    # Tiny (N) to Narrow (S)
-        # Horizontal reducers (E-W orientation)
-        'Rh': ('h', 30, 12),   # Medium (E) to Narrow (W)
-        'RH': ('h', 12, 30),   # Narrow (E) to Medium (W)
-        'Th': ('h', 12, 5),    # Narrow (E) to Tiny (W)
-        'TH': ('h', 5, 12),    # Tiny (E) to Narrow (W)
+        'Rv': ('v', 30, 12), 'RV': ('v', 12, 30),
+        'Tv': ('v', 12, 5),  'TV': ('v', 5, 12),
+        'Rh': ('h', 30, 12), 'RH': ('h', 12, 30),
+        'Th': ('h', 12, 5),  'TH': ('h', 5, 12),
     }
     if ch not in reducer_info:
         return
 
     orient, hw_start, hw_end = reducer_info[ch]
 
-    band_width = params['band_width']
-    band_offset = params['band_offset']
-    spacing = params['spacing']
+    raw_band_width = params['band_width']
+    raw_band_offset = params['band_offset']
+    raw_spacing = params['spacing']
     hatch_angle = params['angle']
-    jitter_pos = params['jitter_pos']
+    raw_jitter_pos = params['jitter_pos']
     jitter_angle = params['jitter_angle']
     band_width_jitter = params.get('band_width_jitter', 0.0)
-    wiggle = params.get('wiggle', 0.0)
+    raw_wiggle = params.get('wiggle', 0.0)
 
     if orient == 'v':
         tangent = (0, 1)
@@ -1766,44 +1807,90 @@ def draw_reducer_directional_shading(drawing, ch, xloc, yloc, light_dir, sw, par
     dot_right = _dot(normal_right, light_dir)
     shadow_normal = normal_left if dot_left < dot_right else normal_right
 
-    # Collect all hatch angles to draw (for crosshatching)
     angles_to_draw = [hatch_angle]
     if params.get('crosshatch'):
         angles_to_draw.append(hatch_angle + params.get('crosshatch_angle', 90))
 
-    num_hatches = int(90 / spacing)
+    # Map hw to t-axis direction:
+    #   Vertical: N(-t)=start, S(+t)=end
+    #   Horizontal: W(-t)=end, E(+t)=start
+    if orient == 'v':
+        hw_neg = hw_start   # at negative-t end (North)
+        hw_pos = hw_end     # at positive-t end (South)
+    else:
+        hw_neg = hw_end     # at negative-t end (West)
+        hw_pos = hw_start   # at positive-t end (East)
+
+    # Three sections: straight, taper, straight
+    # Inset from flange zones (flanges at t=±20, band ±2) so angled hatches
+    # don't spill across the flange boundaries
+    flange_margin = 4  # flange_width(2) + buffer for angled hatches
+    # Each: (t_start, t_end, hw_at_t_start, hw_at_t_end)
+    sections = [
+        (-45, -20 - flange_margin, hw_neg, hw_neg),   # straight (negative-t end)
+        (-20 + flange_margin,  20 - flange_margin, hw_neg, hw_pos),   # taper
+        ( 20 + flange_margin,  45, hw_pos, hw_pos),   # straight (positive-t end)
+    ]
+
+    # Compute taper wall tangent for hatch direction in the taper section
+    dhw = hw_pos - hw_neg  # change in half_width across the taper
+    if orient == 'v':
+        # Shadow on right: wall (dhw, 40); shadow on left: wall (-dhw, 40)
+        wall_dx = dhw if shadow_normal[0] > 0 else -dhw
+        taper_tangent = _normalize((wall_dx, 40))
+    else:
+        # Shadow on bottom: wall (40, dhw); shadow on top: wall (40, -dhw)
+        wall_dy = dhw if shadow_normal[1] > 0 else -dhw
+        taper_tangent = _normalize((40, wall_dy))
+
     for base_angle in angles_to_draw:
-        for i in range(num_hatches + 1):
-            # t goes from -45 to +45 along the cell
-            t = -45 + i * (90.0 / num_hatches)
+        for (t_start, t_end, sec_hw0, sec_hw1) in sections:
+            sec_len = t_end - t_start
+            is_taper = (sec_hw0 != sec_hw1)
 
-            # Interpolate half_width along the reducer
-            frac = (t + 45) / 90.0  # 0 at start, 1 at end
-            half_width = hw_start + frac * (hw_end - hw_start)
+            # Spacing scaled to average hw in this section
+            sec_avg_hw = (sec_hw0 + sec_hw1) / 2
+            sec_spacing = raw_spacing * (sec_avg_hw / 30)
+            num_sec = max(1, int(sec_len / sec_spacing))
 
-            band_center_dist = half_width - band_offset - band_width / 2
-            # Clamp to valid range
-            band_center_dist = max(1, band_center_dist)
+            for i in range(num_sec + 1):
+                t = t_start + i * (sec_len / num_sec)
 
-            t_jittered = t + random.uniform(-jitter_pos, jitter_pos)
+                # Half-width at this position
+                if is_taper:
+                    frac = (t - t_start) / sec_len
+                    half_width = sec_hw0 + frac * (sec_hw1 - sec_hw0)
+                else:
+                    half_width = sec_hw0
 
-            base_x = xloc + tangent[0] * t_jittered + shadow_normal[0] * band_center_dist
-            base_y = yloc + tangent[1] * t_jittered + shadow_normal[1] * band_center_dist
+                scale = half_width / 30
+                band_width = raw_band_width * scale
+                band_offset = raw_band_offset * scale
+                jitter_pos = raw_jitter_pos * scale
+                wiggle = raw_wiggle * scale
 
-            angle = base_angle + random.uniform(-jitter_angle, jitter_angle)
-            hatch_dir = _rotate_vec(tangent, angle)
+                band_center_dist = half_width - band_offset - band_width / 2
+                band_center_dist = max(1, band_center_dist)
 
-            # Apply band width jitter
-            width_mult = 1.0 + random.uniform(-band_width_jitter, band_width_jitter)
-            half_len = (band_width * 0.6) * width_mult
+                t_jittered = t + random.uniform(-jitter_pos, jitter_pos)
 
-            x1 = base_x - hatch_dir[0] * half_len
-            y1 = base_y - hatch_dir[1] * half_len
-            x2 = base_x + hatch_dir[0] * half_len
-            y2 = base_y + hatch_dir[1] * half_len
+                base_x = xloc + tangent[0] * t_jittered + shadow_normal[0] * band_center_dist
+                base_y = yloc + tangent[1] * t_jittered + shadow_normal[1] * band_center_dist
 
-            _draw_hatch_line(drawing, x1, y1, x2, y2, hatch_dir, wiggle, sw,
-                            pipe_polygon, occlusion_polygon)
+                angle = base_angle + random.uniform(-jitter_angle, jitter_angle)
+                local_tangent = taper_tangent if is_taper else tangent
+                hatch_dir = _rotate_vec(local_tangent, angle)
+
+                width_mult = 1.0 + random.uniform(-band_width_jitter, band_width_jitter)
+                half_len = (band_width * 0.6) * width_mult
+
+                x1 = base_x - hatch_dir[0] * half_len
+                y1 = base_y - hatch_dir[1] * half_len
+                x2 = base_x + hatch_dir[0] * half_len
+                y2 = base_y + hatch_dir[1] * half_len
+
+                _draw_hatch_line(drawing, x1, y1, x2, y2, hatch_dir, wiggle, sw,
+                                pipe_polygon, occlusion_polygon)
 
 
 def draw_cross_directional_shading(drawing, xloc, yloc, light_dir, sw, params,
@@ -2100,7 +2187,7 @@ def draw_corner_shading_clipped(drawing, ch, xloc, yloc, style, sw, occlusion_po
 
 
 def render_svg(grid, stroke_width, shading_style, shading_stroke_width,
-               light_angle_deg=225, shading_params=None):
+               light_angle_deg=225, shading_params=None, progress_callback=None):
     """Render a grid of pipe characters to an SVG string.
 
     All strokes are properly clipped against other pipes for pen plotting.
@@ -2126,6 +2213,8 @@ def render_svg(grid, stroke_width, shading_style, shading_stroke_width,
     pad = max(stroke_width, shading_stroke_width) * 0.5 + 0.1
 
     # Draw each pipe with proper clipping against all other pipes
+    total_tiles = width * height
+    tile_count = 0
     for x in range(width):
         for y in range(height):
             ch = grid[x][y]
@@ -2151,9 +2240,10 @@ def render_svg(grid, stroke_width, shading_style, shading_stroke_width,
                 draw_cross_outline(d, xloc, yloc, occlusion_poly, stroke_width)
             elif ch in ('T', 'B', 'E', 'W'):
                 draw_tee_outline(d, ch, xloc, yloc, occlusion_poly, stroke_width)
-            elif ch == '+':
+            elif ch in CROSSOVER_TUBES:
                 # Crossover: draw with depth ordering (vertical on top of horizontal)
-                v_poly = get_tube_polygon('|', xloc, yloc)
+                v_ch, h_ch = CROSSOVER_TUBES[ch]
+                v_poly = get_tube_polygon(v_ch, xloc, yloc)
                 if v_poly:
                     v_poly = v_poly.buffer(pad, join_style=2)
 
@@ -2163,10 +2253,10 @@ def render_svg(grid, stroke_width, shading_style, shading_stroke_width,
                     h_occlusion = h_occlusion.union(v_poly)
                 elif v_poly is not None:
                     h_occlusion = v_poly
-                draw_tube_outline(d, '-', xloc, yloc, h_occlusion, stroke_width)
+                draw_tube_outline(d, h_ch, xloc, yloc, h_occlusion, stroke_width)
 
                 # Draw vertical on top (only clipped against other pipes, not horizontal)
-                draw_tube_outline(d, '|', xloc, yloc, occlusion_poly, stroke_width)
+                draw_tube_outline(d, v_ch, xloc, yloc, occlusion_poly, stroke_width)
 
             # Draw shading with clipping
             if shading_style == 'directional-hatch':
@@ -2199,15 +2289,15 @@ def render_svg(grid, stroke_width, shading_style, shading_stroke_width,
                 elif ch in ('T', 'B', 'E', 'W'):
                     draw_tee_directional_shading(d, ch, xloc, yloc, light_dir, shading_stroke_width, params,
                                                  pipe_polygon=pipe_poly, occlusion_polygon=occlusion_poly)
-                elif ch == '+':
-                    v_poly = get_tube_polygon('|', xloc, yloc)
-                    h_poly = get_tube_polygon('-', xloc, yloc)
+                elif ch in CROSSOVER_TUBES:
+                    v_ch, h_ch = CROSSOVER_TUBES[ch]
+                    v_poly = get_tube_polygon(v_ch, xloc, yloc)
+                    h_poly = get_tube_polygon(h_ch, xloc, yloc)
                     if v_poly:
                         v_poly = v_poly.buffer(0)
                     if h_poly:
                         h_poly = h_poly.buffer(0)
 
-                    # Horizontal shading clipped against vertical tube too
                     h_occlusion = occlusion_poly
                     if h_occlusion is not None and v_poly is not None:
                         v_buffered = v_poly.buffer(pad, join_style=2)
@@ -2215,11 +2305,9 @@ def render_svg(grid, stroke_width, shading_style, shading_stroke_width,
                     elif v_poly is not None:
                         h_occlusion = v_poly.buffer(pad, join_style=2)
 
-                    # Draw horizontal shading first (underneath)
-                    draw_tube_directional_shading(d, '-', xloc, yloc, light_dir, shading_stroke_width, params,
+                    draw_tube_directional_shading(d, h_ch, xloc, yloc, light_dir, shading_stroke_width, params,
                                                   pipe_polygon=h_poly, occlusion_polygon=h_occlusion)
-                    # Draw vertical shading on top
-                    draw_tube_directional_shading(d, '|', xloc, yloc, light_dir, shading_stroke_width, params,
+                    draw_tube_directional_shading(d, v_ch, xloc, yloc, light_dir, shading_stroke_width, params,
                                                   pipe_polygon=v_poly, occlusion_polygon=occlusion_poly)
 
             elif shading_style in ('accent', 'hatch', 'double-wall'):
@@ -2228,9 +2316,9 @@ def render_svg(grid, stroke_width, shading_style, shading_stroke_width,
                     draw_tube_shading_clipped(d, ch, xloc, yloc, shading_style, shading_stroke_width, occlusion_poly)
                 elif ch in ('r', '7', 'j', 'L'):
                     draw_corner_shading_clipped(d, ch, xloc, yloc, shading_style, shading_stroke_width, occlusion_poly)
-                elif ch == '+':
-                    # Crossover with depth ordering
-                    v_poly = get_tube_polygon('|', xloc, yloc)
+                elif ch in CROSSOVER_TUBES:
+                    v_ch, h_ch = CROSSOVER_TUBES[ch]
+                    v_poly = get_tube_polygon(v_ch, xloc, yloc)
                     if v_poly:
                         v_poly = v_poly.buffer(pad, join_style=2)
 
@@ -2240,7 +2328,11 @@ def render_svg(grid, stroke_width, shading_style, shading_stroke_width,
                     elif v_poly is not None:
                         h_occlusion = v_poly
 
-                    draw_tube_shading_clipped(d, '-', xloc, yloc, shading_style, shading_stroke_width, h_occlusion)
-                    draw_tube_shading_clipped(d, '|', xloc, yloc, shading_style, shading_stroke_width, occlusion_poly)
+                    draw_tube_shading_clipped(d, h_ch, xloc, yloc, shading_style, shading_stroke_width, h_occlusion)
+                    draw_tube_shading_clipped(d, v_ch, xloc, yloc, shading_style, shading_stroke_width, occlusion_poly)
+
+            tile_count += 1
+            if progress_callback:
+                progress_callback(tile_count, total_tiles)
 
     return d.as_svg()

@@ -116,10 +116,17 @@ if 'grid' not in st.session_state or st.session_state.get('grid_dims') != curren
 grid = st.session_state.grid
 
 if grid:
+    progress_bar = st.progress(0, text="Rendering tiles...")
+
+    def update_progress(current, total):
+        progress_bar.progress(current / total, text="Rendering tile {} / {}".format(current, total))
+
     svg_string = pipe_core.render_svg(
         grid, stroke_width, shading_style, shading_stroke_width,
-        light_angle_deg=light_angle, shading_params=shading_params
+        light_angle_deg=light_angle, shading_params=shading_params,
+        progress_callback=update_progress
     )
+    progress_bar.empty()
     # Make SVG responsive for display
     display_svg = re.sub(r'width="\d+"', 'width="100%"', svg_string, count=1)
     display_svg = re.sub(r'height="\d+"', 'height="100%"', display_svg, count=1)
