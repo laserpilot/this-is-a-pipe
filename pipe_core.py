@@ -204,7 +204,10 @@ def get_sized_corner_polygon(ch, xloc, yloc, half_width, num_arc_points=16):
 
 
 def get_reducer_polygon(ch, xloc, yloc):
-    """Return Shapely Polygon for a reducer tile (tapers between two sizes)."""
+    """Return Shapely Polygon for a reducer tile (tapers between two sizes).
+
+    Includes flange geometry so shading is properly clipped around flanges.
+    """
     # Reducer mapping: start_size, end_size, orientation
     reducers = {
         'Rv': ('m', 'n', 'v'),  # Medium top, narrow bottom
@@ -224,10 +227,14 @@ def get_reducer_polygon(ch, xloc, yloc):
     hw_start = PIPE_HALF_WIDTHS[start_size]
     hw_end = PIPE_HALF_WIDTHS[end_size]
 
+    # Flange dimensions (must match draw_reducer_flanges)
+    flange_start = hw_start * 0.15
+    flange_end = hw_end * 0.15
+    flange_width = 3
+
     if orient == 'v':  # Vertical: tapers along Y axis
-        # Start at top (y=-50), end at bottom (y=+50)
-        # Taper in middle 60 units, straight sections at ends
-        return Polygon([
+        # Main pipe body
+        pipe_poly = Polygon([
             (xloc - hw_start, yloc - 50),
             (xloc + hw_start, yloc - 50),
             (xloc + hw_start, yloc - 20),  # Start taper
@@ -237,9 +244,24 @@ def get_reducer_polygon(ch, xloc, yloc):
             (xloc - hw_end, yloc + 20),
             (xloc - hw_start, yloc - 20),
         ])
+        # Flange at start (y=-20)
+        flange1 = Polygon([
+            (xloc - hw_start - flange_start, yloc - 20 - flange_width),
+            (xloc + hw_start + flange_start, yloc - 20 - flange_width),
+            (xloc + hw_start + flange_start, yloc - 20 + flange_width),
+            (xloc - hw_start - flange_start, yloc - 20 + flange_width),
+        ])
+        # Flange at end (y=+20)
+        flange2 = Polygon([
+            (xloc - hw_end - flange_end, yloc + 20 - flange_width),
+            (xloc + hw_end + flange_end, yloc + 20 - flange_width),
+            (xloc + hw_end + flange_end, yloc + 20 + flange_width),
+            (xloc - hw_end - flange_end, yloc + 20 + flange_width),
+        ])
+        return unary_union([pipe_poly, flange1, flange2])
     else:  # Horizontal: tapers along X axis
-        # Start at right (x=+50), end at left (x=-50)
-        return Polygon([
+        # Main pipe body
+        pipe_poly = Polygon([
             (xloc + 50, yloc - hw_start),
             (xloc + 50, yloc + hw_start),
             (xloc + 20, yloc + hw_start),  # Start taper
@@ -249,6 +271,21 @@ def get_reducer_polygon(ch, xloc, yloc):
             (xloc - 20, yloc - hw_end),
             (xloc + 20, yloc - hw_start),
         ])
+        # Flange at start (x=+20)
+        flange1 = Polygon([
+            (xloc + 20 - flange_width, yloc - hw_start - flange_start),
+            (xloc + 20 + flange_width, yloc - hw_start - flange_start),
+            (xloc + 20 + flange_width, yloc + hw_start + flange_start),
+            (xloc + 20 - flange_width, yloc + hw_start + flange_start),
+        ])
+        # Flange at end (x=-20)
+        flange2 = Polygon([
+            (xloc - 20 - flange_width, yloc - hw_end - flange_end),
+            (xloc - 20 + flange_width, yloc - hw_end - flange_end),
+            (xloc - 20 + flange_width, yloc + hw_end + flange_end),
+            (xloc - 20 - flange_width, yloc + hw_end + flange_end),
+        ])
+        return unary_union([pipe_poly, flange1, flange2])
 
 
 def get_corner_polygon(ch, xloc, yloc, num_arc_points=16):
@@ -900,7 +937,11 @@ def draw_sized_corner_outline(drawing, ch, xloc, yloc, half_width, occlusion_pol
 
 
 def draw_reducer_outline(drawing, ch, xloc, yloc, occlusion_poly, sw):
-    """Draw a reducer pipe outline (tapers between two sizes)."""
+    """Draw a reducer pipe outline (tapers between two sizes).
+
+    Walls are self-clipped against own flange polygons so flanges visually
+    cross the pipe walls. Flanges are drawn as full rectangles (rings).
+    """
     reducers = {
         'Rv': ('m', 'n', 'v'),  # Medium top, narrow bottom
         'RV': ('n', 'm', 'v'),  # Narrow top, medium bottom
@@ -919,27 +960,106 @@ def draw_reducer_outline(drawing, ch, xloc, yloc, occlusion_poly, sw):
     hw_start = PIPE_HALF_WIDTHS[start_size]
     hw_end = PIPE_HALF_WIDTHS[end_size]
 
-    if orient == 'v':  # Vertical reducer
-        # Left side: from (-hw_start, -50) to (-hw_start, -20) to (-hw_end, 20) to (-hw_end, 50)
-        clip_and_draw_line(drawing, xloc - hw_start, yloc - 50, xloc - hw_start, yloc - 20, occlusion_poly, sw)
-        clip_and_draw_line(drawing, xloc - hw_start, yloc - 20, xloc - hw_end, yloc + 20, occlusion_poly, sw)
-        clip_and_draw_line(drawing, xloc - hw_end, yloc + 20, xloc - hw_end, yloc + 50, occlusion_poly, sw)
+    # Flange dimensions (must match get_reducer_polygon)
+    flange_start = hw_start * 0.15
+    flange_end = hw_end * 0.15
+    flange_width = 3
 
-        # Right side: mirror
-        clip_and_draw_line(drawing, xloc + hw_start, yloc - 50, xloc + hw_start, yloc - 20, occlusion_poly, sw)
-        clip_and_draw_line(drawing, xloc + hw_start, yloc - 20, xloc + hw_end, yloc + 20, occlusion_poly, sw)
-        clip_and_draw_line(drawing, xloc + hw_end, yloc + 20, xloc + hw_end, yloc + 50, occlusion_poly, sw)
+    # Build flange polygons for self-clipping
+    if orient == 'v':
+        flange1 = Polygon([
+            (xloc - hw_start - flange_start, yloc - 20 - flange_width),
+            (xloc + hw_start + flange_start, yloc - 20 - flange_width),
+            (xloc + hw_start + flange_start, yloc - 20 + flange_width),
+            (xloc - hw_start - flange_start, yloc - 20 + flange_width),
+        ])
+        flange2 = Polygon([
+            (xloc - hw_end - flange_end, yloc + 20 - flange_width),
+            (xloc + hw_end + flange_end, yloc + 20 - flange_width),
+            (xloc + hw_end + flange_end, yloc + 20 + flange_width),
+            (xloc - hw_end - flange_end, yloc + 20 + flange_width),
+        ])
+    else:
+        flange1 = Polygon([
+            (xloc + 20 - flange_width, yloc - hw_start - flange_start),
+            (xloc + 20 + flange_width, yloc - hw_start - flange_start),
+            (xloc + 20 + flange_width, yloc + hw_start + flange_start),
+            (xloc + 20 - flange_width, yloc + hw_start + flange_start),
+        ])
+        flange2 = Polygon([
+            (xloc - 20 - flange_width, yloc - hw_end - flange_end),
+            (xloc - 20 + flange_width, yloc - hw_end - flange_end),
+            (xloc - 20 + flange_width, yloc + hw_end + flange_end),
+            (xloc - 20 - flange_width, yloc + hw_end + flange_end),
+        ])
+
+    flange_union = unary_union([flange1, flange2]).buffer(0)
+
+    # Wall occlusion = other tiles + own flanges (so walls break at flanges)
+    if occlusion_poly is not None:
+        wall_occlusion = occlusion_poly.union(flange_union)
+    else:
+        wall_occlusion = flange_union
+
+    if orient == 'v':  # Vertical reducer
+        # Pipe walls self-clipped against own flanges
+        clip_and_draw_line(drawing, xloc - hw_start, yloc - 50, xloc - hw_start, yloc - 20, wall_occlusion, sw)
+        clip_and_draw_line(drawing, xloc - hw_start, yloc - 20, xloc - hw_end, yloc + 20, wall_occlusion, sw)
+        clip_and_draw_line(drawing, xloc - hw_end, yloc + 20, xloc - hw_end, yloc + 50, wall_occlusion, sw)
+        clip_and_draw_line(drawing, xloc + hw_start, yloc - 50, xloc + hw_start, yloc - 20, wall_occlusion, sw)
+        clip_and_draw_line(drawing, xloc + hw_start, yloc - 20, xloc + hw_end, yloc + 20, wall_occlusion, sw)
+        clip_and_draw_line(drawing, xloc + hw_end, yloc + 20, xloc + hw_end, yloc + 50, wall_occlusion, sw)
+
+        # Top flange at y=-20: full rectangle (ring across pipe)
+        # Top and bottom horizontals span full width
+        clip_and_draw_line(drawing, xloc - hw_start - flange_start, yloc - 20 - flange_width,
+                          xloc + hw_start + flange_start, yloc - 20 - flange_width, occlusion_poly, sw)
+        clip_and_draw_line(drawing, xloc - hw_start - flange_start, yloc - 20 + flange_width,
+                          xloc + hw_start + flange_start, yloc - 20 + flange_width, occlusion_poly, sw)
+        # Outer vertical edges
+        clip_and_draw_line(drawing, xloc - hw_start - flange_start, yloc - 20 - flange_width,
+                          xloc - hw_start - flange_start, yloc - 20 + flange_width, occlusion_poly, sw)
+        clip_and_draw_line(drawing, xloc + hw_start + flange_start, yloc - 20 - flange_width,
+                          xloc + hw_start + flange_start, yloc - 20 + flange_width, occlusion_poly, sw)
+
+        # Bottom flange at y=+20: full rectangle
+        clip_and_draw_line(drawing, xloc - hw_end - flange_end, yloc + 20 - flange_width,
+                          xloc + hw_end + flange_end, yloc + 20 - flange_width, occlusion_poly, sw)
+        clip_and_draw_line(drawing, xloc - hw_end - flange_end, yloc + 20 + flange_width,
+                          xloc + hw_end + flange_end, yloc + 20 + flange_width, occlusion_poly, sw)
+        clip_and_draw_line(drawing, xloc - hw_end - flange_end, yloc + 20 - flange_width,
+                          xloc - hw_end - flange_end, yloc + 20 + flange_width, occlusion_poly, sw)
+        clip_and_draw_line(drawing, xloc + hw_end + flange_end, yloc + 20 - flange_width,
+                          xloc + hw_end + flange_end, yloc + 20 + flange_width, occlusion_poly, sw)
 
     else:  # Horizontal reducer
-        # Top side
-        clip_and_draw_line(drawing, xloc + 50, yloc - hw_start, xloc + 20, yloc - hw_start, occlusion_poly, sw)
-        clip_and_draw_line(drawing, xloc + 20, yloc - hw_start, xloc - 20, yloc - hw_end, occlusion_poly, sw)
-        clip_and_draw_line(drawing, xloc - 20, yloc - hw_end, xloc - 50, yloc - hw_end, occlusion_poly, sw)
+        # Pipe walls self-clipped against own flanges
+        clip_and_draw_line(drawing, xloc + 50, yloc - hw_start, xloc + 20, yloc - hw_start, wall_occlusion, sw)
+        clip_and_draw_line(drawing, xloc + 20, yloc - hw_start, xloc - 20, yloc - hw_end, wall_occlusion, sw)
+        clip_and_draw_line(drawing, xloc - 20, yloc - hw_end, xloc - 50, yloc - hw_end, wall_occlusion, sw)
+        clip_and_draw_line(drawing, xloc + 50, yloc + hw_start, xloc + 20, yloc + hw_start, wall_occlusion, sw)
+        clip_and_draw_line(drawing, xloc + 20, yloc + hw_start, xloc - 20, yloc + hw_end, wall_occlusion, sw)
+        clip_and_draw_line(drawing, xloc - 20, yloc + hw_end, xloc - 50, yloc + hw_end, wall_occlusion, sw)
 
-        # Bottom side: mirror
-        clip_and_draw_line(drawing, xloc + 50, yloc + hw_start, xloc + 20, yloc + hw_start, occlusion_poly, sw)
-        clip_and_draw_line(drawing, xloc + 20, yloc + hw_start, xloc - 20, yloc + hw_end, occlusion_poly, sw)
-        clip_and_draw_line(drawing, xloc - 20, yloc + hw_end, xloc - 50, yloc + hw_end, occlusion_poly, sw)
+        # Start flange at x=+20: full rectangle
+        clip_and_draw_line(drawing, xloc + 20 - flange_width, yloc - hw_start - flange_start,
+                          xloc + 20 - flange_width, yloc + hw_start + flange_start, occlusion_poly, sw)
+        clip_and_draw_line(drawing, xloc + 20 + flange_width, yloc - hw_start - flange_start,
+                          xloc + 20 + flange_width, yloc + hw_start + flange_start, occlusion_poly, sw)
+        clip_and_draw_line(drawing, xloc + 20 - flange_width, yloc - hw_start - flange_start,
+                          xloc + 20 + flange_width, yloc - hw_start - flange_start, occlusion_poly, sw)
+        clip_and_draw_line(drawing, xloc + 20 - flange_width, yloc + hw_start + flange_start,
+                          xloc + 20 + flange_width, yloc + hw_start + flange_start, occlusion_poly, sw)
+
+        # End flange at x=-20: full rectangle
+        clip_and_draw_line(drawing, xloc - 20 - flange_width, yloc - hw_end - flange_end,
+                          xloc - 20 - flange_width, yloc + hw_end + flange_end, occlusion_poly, sw)
+        clip_and_draw_line(drawing, xloc - 20 + flange_width, yloc - hw_end - flange_end,
+                          xloc - 20 + flange_width, yloc + hw_end + flange_end, occlusion_poly, sw)
+        clip_and_draw_line(drawing, xloc - 20 - flange_width, yloc - hw_end - flange_end,
+                          xloc - 20 + flange_width, yloc - hw_end - flange_end, occlusion_poly, sw)
+        clip_and_draw_line(drawing, xloc - 20 - flange_width, yloc + hw_end + flange_end,
+                          xloc - 20 + flange_width, yloc + hw_end + flange_end, occlusion_poly, sw)
 
 
 # ============================================================================
