@@ -83,12 +83,17 @@ with st.sidebar:
     with st.expander("Shape Weights"):
         w_straight = st.slider("Straights", 0.1, 5.0, 1.0, 0.1)
         w_corner = st.slider("Corners", 0.1, 5.0, 3.0, 0.1)
+        w_chamfer = st.slider("Chamfered Corners", 0.0, 5.0, 0.0, 0.1)
+        w_teardrop = st.slider("Teardrop Corners", 0.0, 5.0, 0.0, 0.1)
+        w_dodge = st.slider("Dodge/Zigzag", 0.0, 5.0, 0.0, 0.1)
         w_junction = st.slider("Junctions", 0.1, 5.0, 2.0, 0.1)
         w_reducer = st.slider("Reducers", 0.1, 5.0, 1.0, 0.1)
 
     tile_weights = {
         'size': {'medium': w_medium, 'narrow': w_narrow, 'tiny': w_tiny},
         'shape': {'straight': w_straight, 'corner': w_corner,
+                  'chamfer': w_chamfer, 'teardrop': w_teardrop,
+                  'dodge': w_dodge,
                   'junction': w_junction, 'reducer': w_reducer},
     }
 

@@ -288,6 +288,167 @@ def get_reducer_polygon(ch, xloc, yloc):
         return unary_union([pipe_poly, flange1, flange2])
 
 
+# Dodge tile params: (orientation, sign, half_width)
+_DODGE_PARAMS = {
+    'z>':  ('v', +1, 30), 'z<':  ('v', -1, 30),
+    'z^':  ('h', -1, 30), 'zv':  ('h', +1, 30),
+    'nz>': ('v', +1, 12), 'nz<': ('v', -1, 12),
+    'nz^': ('h', -1, 12), 'nzv': ('h', +1, 12),
+    'tz>': ('v', +1, 5),  'tz<': ('v', -1, 5),
+    'tz^': ('h', -1, 5),  'tzv': ('h', +1, 5),
+}
+
+
+def get_dodge_polygon(ch, xloc, yloc):
+    """Return Shapely Polygon for a dodge/zigzag tile.
+
+    The pipe follows a Z-shaped path through the cell, shifting laterally
+    by dodge_offset at the midpoint, then returning to center at the exit.
+    """
+    if ch not in _DODGE_PARAMS:
+        return None
+
+    orient, sign, hw = _DODGE_PARAMS[ch]
+    offset = sign * hw / 2
+
+    if orient == 'v':
+        return Polygon([
+            (xloc + hw, yloc - 50),
+            (xloc + hw + offset, yloc),
+            (xloc + hw, yloc + 50),
+            (xloc - hw, yloc + 50),
+            (xloc - hw + offset, yloc),
+            (xloc - hw, yloc - 50),
+        ])
+    else:
+        return Polygon([
+            (xloc - 50, yloc - hw),
+            (xloc, yloc - hw + offset),
+            (xloc + 50, yloc - hw),
+            (xloc + 50, yloc + hw),
+            (xloc, yloc + hw + offset),
+            (xloc - 50, yloc + hw),
+        ])
+
+
+# Chamfered corner params: (base_corner, half_width)
+_CHAMFER_PARAMS = {
+    'cr': ('r', 30), 'c7': ('7', 30), 'cj': ('j', 30), 'cL': ('L', 30),
+    'ncr': ('r', 12), 'nc7': ('7', 12), 'ncj': ('j', 12), 'ncL': ('L', 12),
+    'tcr': ('r', 5), 'tc7': ('7', 5), 'tcj': ('j', 5), 'tcL': ('L', 5),
+}
+
+_CORNER_ROTATIONS = {'r': 0, '7': 90, 'j': 180, 'L': 270}
+
+
+def get_chamfer_polygon(ch, xloc, yloc):
+    """Return Shapely Polygon for a chamfered (45-degree) corner tile.
+
+    Three straight sections (vertical, 45-degree diagonal, horizontal) instead
+    of a smooth arc. The pipe maintains constant width throughout.
+    """
+    if ch not in _CHAMFER_PARAMS:
+        return None
+
+    base, hw = _CHAMFER_PARAMS[ch]
+    rot_deg = _CORNER_ROTATIONS[base]
+    s2 = hw * math.sqrt(2)
+
+    def tp(px, py):
+        rx, ry = _rotate_vec((px, py), rot_deg)
+        return (xloc + rx, yloc + ry)
+
+    # Base r orientation (S+E ports), 8 vertices
+    points = [
+        tp(-hw, 50),          # south edge, inner wall
+        tp(hw, 50),           # south edge, outer wall
+        tp(hw, s2 - hw),      # outer: vert->diag transition
+        tp(s2 - hw, hw),      # outer: diag->horiz transition
+        tp(50, hw),           # east edge, outer wall
+        tp(50, -hw),          # east edge, inner wall
+        tp(-s2 + hw, -hw),    # inner: horiz->diag transition
+        tp(-hw, -s2 + hw),    # inner: diag->vert transition
+    ]
+
+    return Polygon(points)
+
+
+# Teardrop elbow params: (base_corner, half_width)
+_TEARDROP_PARAMS = {
+    'dr': ('r', 30), 'd7': ('7', 30), 'dj': ('j', 30), 'dL': ('L', 30),
+    'ndr': ('r', 12), 'nd7': ('7', 12), 'ndj': ('j', 12), 'ndL': ('L', 12),
+    'tdr': ('r', 5), 'td7': ('7', 5), 'tdj': ('j', 5), 'tdL': ('L', 5),
+}
+
+
+def get_teardrop_polygon(ch, xloc, yloc, num_arc_points=16):
+    """Return Shapely Polygon for a teardrop elbow tile.
+
+    Inner and outer arcs have different centers, creating an asymmetric profile:
+    tight inner curve and bulbous outer curve.
+    """
+    if ch not in _TEARDROP_PARAMS:
+        return None
+
+    base, hw = _TEARDROP_PARAMS[ch]
+    rot_deg = _CORNER_ROTATIONS[base]
+
+    # Dual-center arc parameters
+    c_i = hw * 1.5    # Inner arc center offset
+    r_i = c_i - hw    # Inner arc radius (tight: 0.5 * hw)
+    c_o = hw * 1.0    # Outer arc center offset
+    r_o = c_o + hw    # Outer arc radius (bulbous: 2.0 * hw)
+
+    def tp(px, py):
+        rx, ry = _rotate_vec((px, py), rot_deg)
+        return (xloc + rx, yloc + ry)
+
+    # Arc angles in world coords
+    arc_start = 180 + rot_deg
+    arc_end = 270 + rot_deg
+
+    # Centers in world coords
+    ic = tp(c_i, c_i)
+    oc = tp(c_o, c_o)
+
+    # Build polygon by tracing perimeter
+    points = []
+
+    # Inner wall: south stub -> inner arc -> east stub
+    points.append(tp(hw, 50))       # South edge, inner wall
+    points.append(tp(hw, c_i))      # Inner stub to arc start
+
+    # Inner arc: 180° -> 270° (clockwise)
+    for i in range(num_arc_points + 1):
+        frac = i / num_arc_points
+        angle_deg = arc_start + frac * (arc_end - arc_start)
+        angle_rad = math.radians(angle_deg)
+        x = ic[0] + r_i * math.cos(angle_rad)
+        y = ic[1] + r_i * math.sin(angle_rad)
+        points.append((x, y))
+
+    points.append(tp(50, hw))       # Inner stub to east edge
+
+    # East cell edge
+    points.append(tp(50, -hw))      # East edge, outer wall
+
+    # Outer wall: east stub -> outer arc -> south stub
+    points.append(tp(c_o, -hw))     # Outer stub to arc start
+
+    # Outer arc: 270° -> 180° (counterclockwise)
+    for i in range(num_arc_points + 1):
+        frac = i / num_arc_points
+        angle_deg = arc_end - frac * (arc_end - arc_start)
+        angle_rad = math.radians(angle_deg)
+        x = oc[0] + r_o * math.cos(angle_rad)
+        y = oc[1] + r_o * math.sin(angle_rad)
+        points.append((x, y))
+
+    points.append(tp(-hw, 50))      # Outer stub to south edge
+
+    return Polygon(points)
+
+
 def get_corner_polygon(ch, xloc, yloc, num_arc_points=16):
     """Return Shapely Polygon for a corner arc segment including connector stubs."""
     rotations = {'r': 0, '7': 90, 'j': 180, 'L': 270}
@@ -358,55 +519,57 @@ def get_corner_polygon(ch, xloc, yloc, num_arc_points=16):
     return unary_union([arc_polygon, v_stub, h_stub])
 
 
-def get_cross_polygon(xloc, yloc):
+def get_cross_polygon(xloc, yloc, half_width=30):
     """Return Shapely Polygon for a 4-way cross junction (X).
 
     Shape: Central square with 4 rectangular arms extending to cell edges.
     """
+    hw = half_width
+    edge = 50
     # Central square (-30, -30) to (30, 30)
     center = Polygon([
-        (xloc - 30, yloc - 30),
-        (xloc + 30, yloc - 30),
-        (xloc + 30, yloc + 30),
-        (xloc - 30, yloc + 30),
+        (xloc - hw, yloc - hw),
+        (xloc + hw, yloc - hw),
+        (xloc + hw, yloc + hw),
+        (xloc - hw, yloc + hw),
     ])
 
     # North arm
     n_arm = Polygon([
-        (xloc - 30, yloc - 50),
-        (xloc + 30, yloc - 50),
-        (xloc + 30, yloc - 30),
-        (xloc - 30, yloc - 30),
+        (xloc - hw, yloc - edge),
+        (xloc + hw, yloc - edge),
+        (xloc + hw, yloc - hw),
+        (xloc - hw, yloc - hw),
     ])
 
     # South arm
     s_arm = Polygon([
-        (xloc - 30, yloc + 30),
-        (xloc + 30, yloc + 30),
-        (xloc + 30, yloc + 50),
-        (xloc - 30, yloc + 50),
+        (xloc - hw, yloc + hw),
+        (xloc + hw, yloc + hw),
+        (xloc + hw, yloc + edge),
+        (xloc - hw, yloc + edge),
     ])
 
     # East arm
     e_arm = Polygon([
-        (xloc + 30, yloc - 30),
-        (xloc + 50, yloc - 30),
-        (xloc + 50, yloc + 30),
-        (xloc + 30, yloc + 30),
+        (xloc + hw, yloc - hw),
+        (xloc + edge, yloc - hw),
+        (xloc + edge, yloc + hw),
+        (xloc + hw, yloc + hw),
     ])
 
     # West arm
     w_arm = Polygon([
-        (xloc - 50, yloc - 30),
-        (xloc - 30, yloc - 30),
-        (xloc - 30, yloc + 30),
-        (xloc - 50, yloc + 30),
+        (xloc - edge, yloc - hw),
+        (xloc - hw, yloc - hw),
+        (xloc - hw, yloc + hw),
+        (xloc - edge, yloc + hw),
     ])
 
     return unary_union([center, n_arm, s_arm, e_arm, w_arm])
 
 
-def get_tee_polygon(ch, xloc, yloc):
+def get_tee_polygon(ch, xloc, yloc, half_width=30):
     """Return Shapely Polygon for a 3-way tee junction.
 
     T = closed south, B = closed north, E = closed west, W = closed east.
@@ -415,6 +578,9 @@ def get_tee_polygon(ch, xloc, yloc):
     rot_deg = rotations.get(ch)
     if rot_deg is None:
         return None
+
+    hw = half_width
+    edge = 50
 
     def transform_point(px, py):
         rx, ry = _rotate_vec((px, py), rot_deg)
@@ -425,37 +591,37 @@ def get_tee_polygon(ch, xloc, yloc):
 
     # Central square
     center_pts = [
-        transform_point(-30, -30),
-        transform_point(30, -30),
-        transform_point(30, 30),
-        transform_point(-30, 30),
+        transform_point(-hw, -hw),
+        transform_point(hw, -hw),
+        transform_point(hw, hw),
+        transform_point(-hw, hw),
     ]
     center = Polygon(center_pts)
 
     # North arm (y = -30 to -50)
     n_arm_pts = [
-        transform_point(-30, -50),
-        transform_point(30, -50),
-        transform_point(30, -30),
-        transform_point(-30, -30),
+        transform_point(-hw, -edge),
+        transform_point(hw, -edge),
+        transform_point(hw, -hw),
+        transform_point(-hw, -hw),
     ]
     n_arm = Polygon(n_arm_pts)
 
     # East arm (x = 30 to 50)
     e_arm_pts = [
-        transform_point(30, -30),
-        transform_point(50, -30),
-        transform_point(50, 30),
-        transform_point(30, 30),
+        transform_point(hw, -hw),
+        transform_point(edge, -hw),
+        transform_point(edge, hw),
+        transform_point(hw, hw),
     ]
     e_arm = Polygon(e_arm_pts)
 
     # West arm (x = -50 to -30)
     w_arm_pts = [
-        transform_point(-50, -30),
-        transform_point(-30, -30),
-        transform_point(-30, 30),
-        transform_point(-50, 30),
+        transform_point(-edge, -hw),
+        transform_point(-hw, -hw),
+        transform_point(-hw, hw),
+        transform_point(-edge, hw),
     ]
     w_arm = Polygon(w_arm_pts)
 
@@ -484,6 +650,18 @@ def get_pipe_polygon(ch, xloc, yloc):
     elif ch in ('Rv', 'RV', 'Tv', 'TV', 'Rh', 'RH', 'Th', 'TH'):
         return get_reducer_polygon(ch, xloc, yloc)
 
+    # Dodge/zigzag tiles
+    elif ch in _DODGE_PARAMS:
+        return get_dodge_polygon(ch, xloc, yloc)
+
+    # Chamfered corners
+    elif ch in _CHAMFER_PARAMS:
+        return get_chamfer_polygon(ch, xloc, yloc)
+
+    # Teardrop elbows
+    elif ch in _TEARDROP_PARAMS:
+        return get_teardrop_polygon(ch, xloc, yloc)
+
     # Crossovers (all sizes)
     elif ch in CROSSOVER_TUBES:
         v_ch, h_ch = CROSSOVER_TUBES[ch]
@@ -493,13 +671,23 @@ def get_pipe_polygon(ch, xloc, yloc):
             return unary_union([v, h])
         return v or h
 
-    # Cross junction (medium)
-    elif ch == 'X':
-        return get_cross_polygon(xloc, yloc)
+    # Cross junctions (medium, narrow, tiny)
+    elif ch in ('X', 'nX', 'tX'):
+        hw = 30 if ch == 'X' else (12 if ch == 'nX' else 5)
+        return get_cross_polygon(xloc, yloc, half_width=hw)
 
-    # Tee junctions (medium)
-    elif ch in ('T', 'B', 'E', 'W'):
-        return get_tee_polygon(ch, xloc, yloc)
+    # Tee junctions (medium, narrow, tiny)
+    elif ch in ('T', 'B', 'E', 'W', 'nT', 'nB', 'nE', 'nW', 'tT', 'tB', 'tE', 'tW'):
+        if ch in ('T', 'B', 'E', 'W'):
+            hw = 30
+            base_ch = ch
+        elif ch.startswith('n'):
+            hw = 12
+            base_ch = ch[1:]
+        else:
+            hw = 5
+            base_ch = ch[1:]
+        return get_tee_polygon(base_ch, xloc, yloc, half_width=hw)
 
     return None
 
@@ -754,41 +942,43 @@ def draw_corner_outline(drawing, ch, xloc, yloc, occlusion_poly, sw):
     clip_and_draw_line(drawing, x1, y1, x2, y2, occlusion_poly, sw)
 
 
-def draw_cross_outline(drawing, xloc, yloc, occlusion_poly, sw):
+def draw_cross_outline(drawing, xloc, yloc, occlusion_poly, sw, half_width=30):
     """Draw outline for a 4-way cross junction (X).
 
     Shape: Central square with 4 arms. Draw continuous perimeter.
     """
+    hw = half_width
+    edge = 50
     # Draw the cross perimeter as a series of connected line segments
     # Starting from top-left of north arm, going clockwise
 
     # North arm - left side (top to inner corner)
-    clip_and_draw_line(drawing, xloc - 30, yloc - 50, xloc - 30, yloc - 30, occlusion_poly, sw)
+    clip_and_draw_line(drawing, xloc - hw, yloc - edge, xloc - hw, yloc - hw, occlusion_poly, sw)
     # West arm - top side (inner corner to outer)
-    clip_and_draw_line(drawing, xloc - 30, yloc - 30, xloc - 50, yloc - 30, occlusion_poly, sw)
+    clip_and_draw_line(drawing, xloc - hw, yloc - hw, xloc - edge, yloc - hw, occlusion_poly, sw)
     # West arm - left side
-    clip_and_draw_line(drawing, xloc - 50, yloc - 30, xloc - 50, yloc + 30, occlusion_poly, sw)
+    clip_and_draw_line(drawing, xloc - edge, yloc - hw, xloc - edge, yloc + hw, occlusion_poly, sw)
     # West arm - bottom side (outer to inner corner)
-    clip_and_draw_line(drawing, xloc - 50, yloc + 30, xloc - 30, yloc + 30, occlusion_poly, sw)
+    clip_and_draw_line(drawing, xloc - edge, yloc + hw, xloc - hw, yloc + hw, occlusion_poly, sw)
     # South arm - left side (inner corner to bottom)
-    clip_and_draw_line(drawing, xloc - 30, yloc + 30, xloc - 30, yloc + 50, occlusion_poly, sw)
+    clip_and_draw_line(drawing, xloc - hw, yloc + hw, xloc - hw, yloc + edge, occlusion_poly, sw)
     # South arm - bottom side
-    clip_and_draw_line(drawing, xloc - 30, yloc + 50, xloc + 30, yloc + 50, occlusion_poly, sw)
+    clip_and_draw_line(drawing, xloc - hw, yloc + edge, xloc + hw, yloc + edge, occlusion_poly, sw)
     # South arm - right side (bottom to inner corner)
-    clip_and_draw_line(drawing, xloc + 30, yloc + 50, xloc + 30, yloc + 30, occlusion_poly, sw)
+    clip_and_draw_line(drawing, xloc + hw, yloc + edge, xloc + hw, yloc + hw, occlusion_poly, sw)
     # East arm - bottom side (inner corner to outer)
-    clip_and_draw_line(drawing, xloc + 30, yloc + 30, xloc + 50, yloc + 30, occlusion_poly, sw)
+    clip_and_draw_line(drawing, xloc + hw, yloc + hw, xloc + edge, yloc + hw, occlusion_poly, sw)
     # East arm - right side
-    clip_and_draw_line(drawing, xloc + 50, yloc + 30, xloc + 50, yloc - 30, occlusion_poly, sw)
+    clip_and_draw_line(drawing, xloc + edge, yloc + hw, xloc + edge, yloc - hw, occlusion_poly, sw)
     # East arm - top side (outer to inner corner)
-    clip_and_draw_line(drawing, xloc + 50, yloc - 30, xloc + 30, yloc - 30, occlusion_poly, sw)
+    clip_and_draw_line(drawing, xloc + edge, yloc - hw, xloc + hw, yloc - hw, occlusion_poly, sw)
     # North arm - right side (inner corner to top)
-    clip_and_draw_line(drawing, xloc + 30, yloc - 30, xloc + 30, yloc - 50, occlusion_poly, sw)
+    clip_and_draw_line(drawing, xloc + hw, yloc - hw, xloc + hw, yloc - edge, occlusion_poly, sw)
     # North arm - top side
-    clip_and_draw_line(drawing, xloc + 30, yloc - 50, xloc - 30, yloc - 50, occlusion_poly, sw)
+    clip_and_draw_line(drawing, xloc + hw, yloc - edge, xloc - hw, yloc - edge, occlusion_poly, sw)
 
 
-def draw_tee_outline(drawing, ch, xloc, yloc, occlusion_poly, sw):
+def draw_tee_outline(drawing, ch, xloc, yloc, occlusion_poly, sw, half_width=30):
     """Draw outline for a 3-way tee junction.
 
     T = closed south, B = closed north, E = closed west, W = closed east.
@@ -798,6 +988,9 @@ def draw_tee_outline(drawing, ch, xloc, yloc, occlusion_poly, sw):
     if rot_deg is None:
         return
 
+    hw = half_width
+    edge = 50
+
     def transform_point(px, py):
         rx, ry = _rotate_vec((px, py), rot_deg)
         return (xloc + rx, yloc + ry)
@@ -806,43 +999,43 @@ def draw_tee_outline(drawing, ch, xloc, yloc, occlusion_poly, sw):
     # Draw perimeter clockwise starting from top-left of north arm
 
     # North arm - left side (top to inner corner)
-    x1, y1 = transform_point(-30, -50)
-    x2, y2 = transform_point(-30, -30)
+    x1, y1 = transform_point(-hw, -edge)
+    x2, y2 = transform_point(-hw, -hw)
     clip_and_draw_line(drawing, x1, y1, x2, y2, occlusion_poly, sw)
 
     # West arm - top side (inner corner to outer)
-    x1, y1 = transform_point(-30, -30)
-    x2, y2 = transform_point(-50, -30)
+    x1, y1 = transform_point(-hw, -hw)
+    x2, y2 = transform_point(-edge, -hw)
     clip_and_draw_line(drawing, x1, y1, x2, y2, occlusion_poly, sw)
 
     # West arm - left side
-    x1, y1 = transform_point(-50, -30)
-    x2, y2 = transform_point(-50, 30)
+    x1, y1 = transform_point(-edge, -hw)
+    x2, y2 = transform_point(-edge, hw)
     clip_and_draw_line(drawing, x1, y1, x2, y2, occlusion_poly, sw)
 
     # Bottom (closed side) - flat line from west to east
-    x1, y1 = transform_point(-50, 30)
-    x2, y2 = transform_point(50, 30)
+    x1, y1 = transform_point(-edge, hw)
+    x2, y2 = transform_point(edge, hw)
     clip_and_draw_line(drawing, x1, y1, x2, y2, occlusion_poly, sw)
 
     # East arm - right side
-    x1, y1 = transform_point(50, 30)
-    x2, y2 = transform_point(50, -30)
+    x1, y1 = transform_point(edge, hw)
+    x2, y2 = transform_point(edge, -hw)
     clip_and_draw_line(drawing, x1, y1, x2, y2, occlusion_poly, sw)
 
     # East arm - top side (outer to inner corner)
-    x1, y1 = transform_point(50, -30)
-    x2, y2 = transform_point(30, -30)
+    x1, y1 = transform_point(edge, -hw)
+    x2, y2 = transform_point(hw, -hw)
     clip_and_draw_line(drawing, x1, y1, x2, y2, occlusion_poly, sw)
 
     # North arm - right side (inner corner to top)
-    x1, y1 = transform_point(30, -30)
-    x2, y2 = transform_point(30, -50)
+    x1, y1 = transform_point(hw, -hw)
+    x2, y2 = transform_point(hw, -edge)
     clip_and_draw_line(drawing, x1, y1, x2, y2, occlusion_poly, sw)
 
     # North arm - top side
-    x1, y1 = transform_point(30, -50)
-    x2, y2 = transform_point(-30, -50)
+    x1, y1 = transform_point(hw, -edge)
+    x2, y2 = transform_point(-hw, -edge)
     clip_and_draw_line(drawing, x1, y1, x2, y2, occlusion_poly, sw)
 
 
@@ -937,6 +1130,130 @@ def draw_sized_corner_outline(drawing, ch, xloc, yloc, half_width, occlusion_pol
         x1, y1 = transform_point(-half_width, connect_start)
         x2, y2 = transform_point(-half_width, 50)
         clip_and_draw_line(drawing, x1, y1, x2, y2, occlusion_poly, sw)
+
+
+def draw_dodge_outline(drawing, ch, xloc, yloc, occlusion_poly, sw):
+    """Draw outline for a dodge/zigzag tile (Z-shaped pipe path)."""
+    if ch not in _DODGE_PARAMS:
+        return
+
+    orient, sign, hw = _DODGE_PARAMS[ch]
+    offset = sign * hw / 2
+
+    if orient == 'v':
+        # Right wall: top -> mid -> bottom
+        clip_and_draw_line(drawing, xloc + hw, yloc - 50,
+                          xloc + hw + offset, yloc, occlusion_poly, sw)
+        clip_and_draw_line(drawing, xloc + hw + offset, yloc,
+                          xloc + hw, yloc + 50, occlusion_poly, sw)
+        # Left wall: top -> mid -> bottom
+        clip_and_draw_line(drawing, xloc - hw, yloc - 50,
+                          xloc - hw + offset, yloc, occlusion_poly, sw)
+        clip_and_draw_line(drawing, xloc - hw + offset, yloc,
+                          xloc - hw, yloc + 50, occlusion_poly, sw)
+    else:
+        # Top wall: left -> mid -> right
+        clip_and_draw_line(drawing, xloc - 50, yloc - hw,
+                          xloc, yloc - hw + offset, occlusion_poly, sw)
+        clip_and_draw_line(drawing, xloc, yloc - hw + offset,
+                          xloc + 50, yloc - hw, occlusion_poly, sw)
+        # Bottom wall: left -> mid -> right
+        clip_and_draw_line(drawing, xloc - 50, yloc + hw,
+                          xloc, yloc + hw + offset, occlusion_poly, sw)
+        clip_and_draw_line(drawing, xloc, yloc + hw + offset,
+                          xloc + 50, yloc + hw, occlusion_poly, sw)
+
+
+def draw_chamfer_outline(drawing, ch, xloc, yloc, occlusion_poly, sw):
+    """Draw outline for a chamfered (45-degree) corner tile."""
+    if ch not in _CHAMFER_PARAMS:
+        return
+
+    base, hw = _CHAMFER_PARAMS[ch]
+    rot_deg = _CORNER_ROTATIONS[base]
+    s2 = hw * math.sqrt(2)
+
+    def tp(px, py):
+        rx, ry = _rotate_vec((px, py), rot_deg)
+        return (xloc + rx, yloc + ry)
+
+    # Outer wall: vertical section -> diagonal -> horizontal section
+    x1, y1 = tp(hw, 50)
+    x2, y2 = tp(hw, s2 - hw)
+    clip_and_draw_line(drawing, x1, y1, x2, y2, occlusion_poly, sw)
+
+    x1, y1 = tp(hw, s2 - hw)
+    x2, y2 = tp(s2 - hw, hw)
+    clip_and_draw_line(drawing, x1, y1, x2, y2, occlusion_poly, sw)
+
+    x1, y1 = tp(s2 - hw, hw)
+    x2, y2 = tp(50, hw)
+    clip_and_draw_line(drawing, x1, y1, x2, y2, occlusion_poly, sw)
+
+    # Inner wall: horizontal section -> diagonal -> vertical section
+    x1, y1 = tp(50, -hw)
+    x2, y2 = tp(-s2 + hw, -hw)
+    clip_and_draw_line(drawing, x1, y1, x2, y2, occlusion_poly, sw)
+
+    x1, y1 = tp(-s2 + hw, -hw)
+    x2, y2 = tp(-hw, -s2 + hw)
+    clip_and_draw_line(drawing, x1, y1, x2, y2, occlusion_poly, sw)
+
+    x1, y1 = tp(-hw, -s2 + hw)
+    x2, y2 = tp(-hw, 50)
+    clip_and_draw_line(drawing, x1, y1, x2, y2, occlusion_poly, sw)
+
+
+def draw_teardrop_outline(drawing, ch, xloc, yloc, occlusion_poly, sw):
+    """Draw outline for a teardrop elbow tile (dual-center arcs)."""
+    if ch not in _TEARDROP_PARAMS:
+        return
+
+    base, hw = _TEARDROP_PARAMS[ch]
+    rot_deg = _CORNER_ROTATIONS[base]
+
+    c_i = hw * 1.5
+    r_i = c_i - hw    # 0.5 * hw
+    c_o = hw * 1.0
+    r_o = c_o + hw    # 2.0 * hw
+
+    def tp(px, py):
+        rx, ry = _rotate_vec((px, py), rot_deg)
+        return (xloc + rx, yloc + ry)
+
+    # Arc centers in world coords
+    ic = tp(c_i, c_i)
+    oc = tp(c_o, c_o)
+
+    arc_start = 180 + rot_deg
+    arc_end = 270 + rot_deg
+
+    # Draw inner arc (tight)
+    clip_and_draw_arc(drawing, ic[0], ic[1], r_i, arc_start, arc_end, occlusion_poly, sw)
+
+    # Draw outer arc (bulbous)
+    clip_and_draw_arc(drawing, oc[0], oc[1], r_o, arc_start, arc_end, occlusion_poly, sw)
+
+    # Draw stubs connecting arcs to cell edges
+    # Inner vertical stub: (hw, c_i) -> (hw, 50)
+    x1, y1 = tp(hw, c_i)
+    x2, y2 = tp(hw, 50)
+    clip_and_draw_line(drawing, x1, y1, x2, y2, occlusion_poly, sw)
+
+    # Outer vertical stub: (-hw, c_o) -> (-hw, 50)
+    x1, y1 = tp(-hw, c_o)
+    x2, y2 = tp(-hw, 50)
+    clip_and_draw_line(drawing, x1, y1, x2, y2, occlusion_poly, sw)
+
+    # Inner horizontal stub: (c_i, hw) -> (50, hw)
+    x1, y1 = tp(c_i, hw)
+    x2, y2 = tp(50, hw)
+    clip_and_draw_line(drawing, x1, y1, x2, y2, occlusion_poly, sw)
+
+    # Outer horizontal stub: (c_o, -hw) -> (50, -hw)
+    x1, y1 = tp(c_o, -hw)
+    x2, y2 = tp(50, -hw)
+    clip_and_draw_line(drawing, x1, y1, x2, y2, occlusion_poly, sw)
 
 
 def draw_reducer_outline(drawing, ch, xloc, yloc, occlusion_poly, sw):
@@ -1104,6 +1421,11 @@ PORTS = {
     'n7': {'S': 'n', 'W': 'n'},
     'nj': {'N': 'n', 'W': 'n'},
     'nL': {'N': 'n', 'E': 'n'},
+    'nX': {'N': 'n', 'S': 'n', 'E': 'n', 'W': 'n'},
+    'nT': {'N': 'n', 'E': 'n', 'W': 'n'},
+    'nB': {'S': 'n', 'E': 'n', 'W': 'n'},
+    'nE': {'N': 'n', 'S': 'n', 'E': 'n'},
+    'nW': {'N': 'n', 'S': 'n', 'W': 'n'},
 
     # Tiny pipes (±8 walls)
     '!': {'N': 't', 'S': 't'},           # Tiny vertical
@@ -1112,6 +1434,35 @@ PORTS = {
     't7': {'S': 't', 'W': 't'},
     'tj': {'N': 't', 'W': 't'},
     'tL': {'N': 't', 'E': 't'},
+    'tX': {'N': 't', 'S': 't', 'E': 't', 'W': 't'},
+    'tT': {'N': 't', 'E': 't', 'W': 't'},
+    'tB': {'S': 't', 'E': 't', 'W': 't'},
+    'tE': {'N': 't', 'S': 't', 'E': 't'},
+    'tW': {'N': 't', 'S': 't', 'W': 't'},
+
+    # Dodge/zigzag tiles (same ports as straights, Z-shaped path)
+    'z>': {'N': 'm', 'S': 'm'},  'z<': {'N': 'm', 'S': 'm'},
+    'z^': {'E': 'm', 'W': 'm'},  'zv': {'E': 'm', 'W': 'm'},
+    'nz>': {'N': 'n', 'S': 'n'}, 'nz<': {'N': 'n', 'S': 'n'},
+    'nz^': {'E': 'n', 'W': 'n'}, 'nzv': {'E': 'n', 'W': 'n'},
+    'tz>': {'N': 't', 'S': 't'}, 'tz<': {'N': 't', 'S': 't'},
+    'tz^': {'E': 't', 'W': 't'}, 'tzv': {'E': 't', 'W': 't'},
+
+    # Chamfered corners (45-degree elbows, same ports as standard corners)
+    'cr': {'S': 'm', 'E': 'm'},  'c7': {'S': 'm', 'W': 'm'},
+    'cj': {'N': 'm', 'W': 'm'},  'cL': {'N': 'm', 'E': 'm'},
+    'ncr': {'S': 'n', 'E': 'n'}, 'nc7': {'S': 'n', 'W': 'n'},
+    'ncj': {'N': 'n', 'W': 'n'}, 'ncL': {'N': 'n', 'E': 'n'},
+    'tcr': {'S': 't', 'E': 't'}, 'tc7': {'S': 't', 'W': 't'},
+    'tcj': {'N': 't', 'W': 't'}, 'tcL': {'N': 't', 'E': 't'},
+
+    # Teardrop elbows (asymmetric arcs, same ports as standard corners)
+    'dr': {'S': 'm', 'E': 'm'},  'd7': {'S': 'm', 'W': 'm'},
+    'dj': {'N': 'm', 'W': 'm'},  'dL': {'N': 'm', 'E': 'm'},
+    'ndr': {'S': 'n', 'E': 'n'}, 'nd7': {'S': 'n', 'W': 'n'},
+    'ndj': {'N': 'n', 'W': 'n'}, 'ndL': {'N': 'n', 'E': 'n'},
+    'tdr': {'S': 't', 'E': 't'}, 'td7': {'S': 't', 'W': 't'},
+    'tdj': {'N': 't', 'W': 't'}, 'tdL': {'N': 't', 'E': 't'},
 
     # Reducers (connect different sizes)
     # Vertical reducers (medium↔narrow)
@@ -1135,11 +1486,14 @@ OPENINGS = {ch: set(ports.keys()) for ch, ports in PORTS.items()}
 
 # Tile category mappings for weight system
 TILE_SIZE = {}
-for _ch in ['|', '-', 'r', '7', 'j', 'L', '+', 'X', 'T', 'B', 'E', 'W']:
+for _ch in ['|', '-', 'r', '7', 'j', 'L', '+', 'X', 'T', 'B', 'E', 'W',
+            'z>', 'z<', 'z^', 'zv', 'cr', 'c7', 'cj', 'cL', 'dr', 'd7', 'dj', 'dL']:
     TILE_SIZE[_ch] = 'medium'
-for _ch in ['i', '=', 'nr', 'n7', 'nj', 'nL']:
+for _ch in ['i', '=', 'nr', 'n7', 'nj', 'nL', 'nX', 'nT', 'nB', 'nE', 'nW',
+            'nz>', 'nz<', 'nz^', 'nzv', 'ncr', 'nc7', 'ncj', 'ncL', 'ndr', 'nd7', 'ndj', 'ndL']:
     TILE_SIZE[_ch] = 'narrow'
-for _ch in ['!', '.', 'tr', 't7', 'tj', 'tL']:
+for _ch in ['!', '.', 'tr', 't7', 'tj', 'tL', 'tX', 'tT', 'tB', 'tE', 'tW',
+            'tz>', 'tz<', 'tz^', 'tzv', 'tcr', 'tc7', 'tcj', 'tcL', 'tdr', 'td7', 'tdj', 'tdL']:
     TILE_SIZE[_ch] = 'tiny'
 for _ch in ['Rv', 'RV', 'Rh', 'RH']:
     TILE_SIZE[_ch] = 'reducer_mn'
@@ -1161,10 +1515,16 @@ for _ch in ['|', '-', 'i', '=', '!', '.']:
 for _ch in ['r', '7', 'j', 'L', 'nr', 'n7', 'nj', 'nL', 'tr', 't7', 'tj', 'tL']:
     TILE_SHAPE[_ch] = 'corner'
 for _ch in ['+', '+n', '+t', '+mn', '+nm', '+mt', '+tm', '+nt', '+tn',
-            'X', 'T', 'B', 'E', 'W']:
+            'X', 'T', 'B', 'E', 'W', 'nX', 'nT', 'nB', 'nE', 'nW', 'tX', 'tT', 'tB', 'tE', 'tW']:
     TILE_SHAPE[_ch] = 'junction'
 for _ch in ['Rv', 'RV', 'Rh', 'RH', 'Tv', 'TV', 'Th', 'TH']:
     TILE_SHAPE[_ch] = 'reducer'
+for _ch in ['z>', 'z<', 'z^', 'zv', 'nz>', 'nz<', 'nz^', 'nzv', 'tz>', 'tz<', 'tz^', 'tzv']:
+    TILE_SHAPE[_ch] = 'dodge'
+for _ch in ['cr', 'c7', 'cj', 'cL', 'ncr', 'nc7', 'ncj', 'ncL', 'tcr', 'tc7', 'tcj', 'tcL']:
+    TILE_SHAPE[_ch] = 'chamfer'
+for _ch in ['dr', 'd7', 'dj', 'dL', 'ndr', 'nd7', 'ndj', 'ndL', 'tdr', 'td7', 'tdj', 'tdL']:
+    TILE_SHAPE[_ch] = 'teardrop'
 
 # Crossover tile → (vertical_tube_char, horizontal_tube_char)
 # Vertical tube is drawn on top, horizontal underneath
@@ -1186,7 +1546,8 @@ def get_tile_weight(ch, tile_weights):
     if tile_weights is None:
         if ch in CROSSOVER_TUBES:
             return 2
-        elif ch in 'r7jL':
+        shape = TILE_SHAPE.get(ch)
+        if shape in ('corner', 'chamfer', 'teardrop'):
             return 3
         return 1
 
@@ -1258,37 +1619,67 @@ def find_w(ch):
 # ============================================================================
 
 def would_complete_tight_circle(poss_grid, x, y, ch, width, height):
-    checks = [
-        ((x, y, 'r'), (x+1, y, '7'), (x, y+1, 'L'), (x+1, y+1, 'j')),
-        ((x-1, y, 'r'), (x, y, '7'), (x-1, y+1, 'L'), (x, y+1, 'j')),
-        ((x, y-1, 'r'), (x+1, y-1, '7'), (x, y, 'L'), (x+1, y, 'j')),
-        ((x-1, y-1, 'r'), (x, y-1, '7'), (x-1, y, 'L'), (x, y, 'j')),
+    """Check if placing ch at (x,y) would complete a tight 2x2 circle.
+
+    Uses port-based detection: a tight circle forms when 4 tiles in a 2x2 block
+    each have exactly 2 ports forming an L-shape, and port sizes match at all
+    shared internal edges. Works for all corner-type tiles (standard, chamfered,
+    teardrop, etc.).
+    """
+    # Required port directions for each role in the 2x2 block:
+    #   TL(x,y)   TR(x+1,y)
+    #   BL(x,y+1) BR(x+1,y+1)
+    _ROLE_DIRS = {
+        'TL': frozenset(['S', 'E']),  # like 'r'
+        'TR': frozenset(['S', 'W']),  # like '7'
+        'BL': frozenset(['N', 'E']),  # like 'L'
+        'BR': frozenset(['N', 'W']),  # like 'j'
+    }
+
+    # Four possible 2x2 blocks that include (x,y), with (x,y)'s role
+    _BLOCKS = [
+        ('TL', [(1, 0, 'TR'), (0, 1, 'BL'), (1, 1, 'BR')]),
+        ('TR', [(-1, 0, 'TL'), (-1, 1, 'BL'), (0, 1, 'BR')]),
+        ('BL', [(0, -1, 'TL'), (1, -1, 'TR'), (1, 0, 'BR')]),
+        ('BR', [(-1, -1, 'TL'), (0, -1, 'TR'), (-1, 0, 'BL')]),
     ]
-    for square in checks:
-        my_pos = None
-        for (px, py, expected) in square:
-            if px == x and py == y:
-                my_pos = (px, py, expected)
-                break
-        if my_pos is None:
+
+    ch_ports = PORTS.get(ch, {})
+
+    for my_role, neighbors in _BLOCKS:
+        # Check if ch has the right port directions for this role
+        if frozenset(ch_ports.keys()) != _ROLE_DIRS[my_role]:
             continue
-        _, _, expected_ch = my_pos
-        if ch != expected_ch:
-            continue
-        all_fixed = True
-        for (px, py, expected) in square:
-            if px == x and py == y:
-                continue
-            if px < 0 or px >= width or py < 0 or py >= height:
-                all_fixed = False
+
+        # Check all neighbors are collapsed and match their roles
+        tile_ports = {my_role: ch_ports}
+        all_match = True
+        for dx, dy, role in neighbors:
+            nx, ny = x + dx, y + dy
+            if nx < 0 or nx >= width or ny < 0 or ny >= height:
+                all_match = False
                 break
-            cell_poss = poss_grid[px][py]
-            if len(cell_poss) == 1 and expected in cell_poss:
-                continue
-            all_fixed = False
-            break
-        if all_fixed:
+            cell = poss_grid[nx][ny]
+            if len(cell) != 1:
+                all_match = False
+                break
+            n_ch = next(iter(cell))
+            n_ports = PORTS.get(n_ch, {})
+            if frozenset(n_ports.keys()) != _ROLE_DIRS[role]:
+                all_match = False
+                break
+            tile_ports[role] = n_ports
+
+        if not all_match:
+            continue
+
+        # Check port size compatibility at all internal edges
+        if (tile_ports['TL']['E'] == tile_ports['TR']['W'] and
+            tile_ports['TL']['S'] == tile_ports['BL']['N'] and
+            tile_ports['TR']['S'] == tile_ports['BR']['N'] and
+            tile_ports['BL']['E'] == tile_ports['BR']['W']):
             return True
+
     return False
 
 
@@ -1766,6 +2157,255 @@ def draw_sized_corner_directional_shading(drawing, ch, xloc, yloc, half_width, l
                             pipe_polygon, occlusion_polygon)
 
 
+def draw_dodge_directional_shading(drawing, ch, xloc, yloc, light_dir, sw, params,
+                                    pipe_polygon=None, occlusion_polygon=None):
+    """Draw directional hatch marks on the shadow side of a dodge tile.
+
+    Two sections (top half and bottom half) with different tangent vectors
+    following the wall angle of each Z-segment.
+    """
+    if ch not in _DODGE_PARAMS:
+        return
+
+    orient, sign, hw = _DODGE_PARAMS[ch]
+    offset = sign * hw / 2
+    scale = hw / 30
+
+    band_width = params['band_width'] * scale
+    band_offset = params['band_offset'] * scale
+    spacing = params['spacing'] * scale
+    hatch_angle = params['angle']
+    jitter_pos = params['jitter_pos'] * scale
+    jitter_angle = params['jitter_angle']
+    band_width_jitter = params.get('band_width_jitter', 0.0)
+    wiggle = params.get('wiggle', 0.0) * scale
+
+    angles_to_draw = [hatch_angle]
+    if params.get('crosshatch'):
+        angles_to_draw.append(hatch_angle + params.get('crosshatch_angle', 90))
+
+    # Two sections with different wall angles
+    if orient == 'v':
+        sections = [
+            ((0, -50), (offset, 0)),     # top half
+            ((offset, 0), (0, 50)),      # bottom half
+        ]
+    else:
+        sections = [
+            ((-50, 0), (0, offset)),     # left half
+            ((0, offset), (50, 0)),      # right half
+        ]
+
+    band_center_dist = hw - band_offset - band_width / 2
+
+    for sec_start, sec_end in sections:
+        dx = sec_end[0] - sec_start[0]
+        dy = sec_end[1] - sec_start[1]
+        tangent = _normalize((dx, dy))
+
+        # Normals perpendicular to tangent
+        normal_left = (-tangent[1], tangent[0])
+        normal_right = (tangent[1], -tangent[0])
+
+        dot_left = _dot(normal_left, light_dir)
+        dot_right = _dot(normal_right, light_dir)
+        shadow_normal = normal_left if dot_left < dot_right else normal_right
+
+        section_length = math.sqrt(dx**2 + dy**2)
+        num_hatches = max(1, int(section_length / spacing))
+
+        for base_angle in angles_to_draw:
+            for i in range(num_hatches + 1):
+                frac = (i + 0.5) / (num_hatches + 1)
+
+                cx = xloc + sec_start[0] + frac * dx
+                cy = yloc + sec_start[1] + frac * dy
+
+                base_x = cx + shadow_normal[0] * band_center_dist
+                base_y = cy + shadow_normal[1] * band_center_dist
+
+                pos_jitter_val = random.uniform(-jitter_pos, jitter_pos)
+                base_x += tangent[0] * pos_jitter_val
+                base_y += tangent[1] * pos_jitter_val
+
+                angle = base_angle + random.uniform(-jitter_angle, jitter_angle)
+                hatch_dir = _rotate_vec(tangent, angle)
+
+                width_mult = 1.0 + random.uniform(-band_width_jitter, band_width_jitter)
+                half_len = (band_width * 0.6) * width_mult
+
+                x1 = base_x - hatch_dir[0] * half_len
+                y1 = base_y - hatch_dir[1] * half_len
+                x2 = base_x + hatch_dir[0] * half_len
+                y2 = base_y + hatch_dir[1] * half_len
+
+                _draw_hatch_line(drawing, x1, y1, x2, y2, hatch_dir, wiggle, sw,
+                                pipe_polygon, occlusion_polygon)
+
+
+def draw_chamfer_directional_shading(drawing, ch, xloc, yloc, light_dir, sw, params,
+                                      pipe_polygon=None, occlusion_polygon=None):
+    """Draw directional hatch marks on a chamfered corner.
+
+    Two straight sections (vertical half and horizontal half) with the diagonal
+    transition handled by polygon clipping.
+    """
+    if ch not in _CHAMFER_PARAMS:
+        return
+
+    base, hw = _CHAMFER_PARAMS[ch]
+    rot_deg = _CORNER_ROTATIONS[base]
+
+    scale = hw / 30
+    band_width = params['band_width'] * scale
+    band_offset = params['band_offset'] * scale
+    spacing = params['spacing'] * scale
+    hatch_angle = params['angle']
+    jitter_pos = params['jitter_pos'] * scale
+    jitter_angle = params['jitter_angle']
+    band_width_jitter = params.get('band_width_jitter', 0.0)
+    wiggle = params.get('wiggle', 0.0) * scale
+
+    angles_to_draw = [hatch_angle]
+    if params.get('crosshatch'):
+        angles_to_draw.append(hatch_angle + params.get('crosshatch_angle', 90))
+
+    # Two sections in local coords (base r orientation):
+    # Vertical half: (0, 50) -> (0, 0), tangent (0, -1)
+    # Horizontal half: (0, 0) -> (50, 0), tangent (1, 0)
+    local_sections = [
+        ((0, 50), (0, 0), (0, -1), (-1, 0), (1, 0)),
+        ((0, 0), (50, 0), (1, 0), (0, -1), (0, 1)),
+    ]
+
+    band_center_dist = hw - band_offset - band_width / 2
+
+    for local_start, local_end, local_tangent, local_nl, local_nr in local_sections:
+        tangent = _rotate_vec(local_tangent, rot_deg)
+        normal_left = _rotate_vec(local_nl, rot_deg)
+        normal_right = _rotate_vec(local_nr, rot_deg)
+
+        start_r = _rotate_vec(local_start, rot_deg)
+        end_r = _rotate_vec(local_end, rot_deg)
+        start_w = (xloc + start_r[0], yloc + start_r[1])
+        end_w = (xloc + end_r[0], yloc + end_r[1])
+
+        dot_left = _dot(normal_left, light_dir)
+        dot_right = _dot(normal_right, light_dir)
+        shadow_normal = normal_left if dot_left < dot_right else normal_right
+
+        num_hatches = max(1, int(50 / spacing))
+
+        for base_angle in angles_to_draw:
+            for i in range(num_hatches + 1):
+                frac = (i + 0.5) / (num_hatches + 1)
+
+                cx = start_w[0] + frac * (end_w[0] - start_w[0])
+                cy = start_w[1] + frac * (end_w[1] - start_w[1])
+
+                base_x = cx + shadow_normal[0] * band_center_dist
+                base_y = cy + shadow_normal[1] * band_center_dist
+
+                pos_jitter_val = random.uniform(-jitter_pos, jitter_pos)
+                base_x += tangent[0] * pos_jitter_val
+                base_y += tangent[1] * pos_jitter_val
+
+                angle = base_angle + random.uniform(-jitter_angle, jitter_angle)
+                hatch_dir = _rotate_vec(tangent, angle)
+
+                width_mult = 1.0 + random.uniform(-band_width_jitter, band_width_jitter)
+                half_len = (band_width * 0.6) * width_mult
+
+                x1 = base_x - hatch_dir[0] * half_len
+                y1 = base_y - hatch_dir[1] * half_len
+                x2 = base_x + hatch_dir[0] * half_len
+                y2 = base_y + hatch_dir[1] * half_len
+
+                _draw_hatch_line(drawing, x1, y1, x2, y2, hatch_dir, wiggle, sw,
+                                pipe_polygon, occlusion_polygon)
+
+
+def draw_teardrop_directional_shading(drawing, ch, xloc, yloc, light_dir, sw, params,
+                                       pipe_polygon=None, occlusion_polygon=None):
+    """Draw directional hatch marks on a teardrop elbow.
+
+    Samples along the arc sweep using the outer arc's radial direction for
+    surface normal, placing hatches on the shadow side.
+    """
+    if ch not in _TEARDROP_PARAMS:
+        return
+
+    base, hw = _TEARDROP_PARAMS[ch]
+    rot_deg = _CORNER_ROTATIONS[base]
+
+    scale = hw / 30
+    band_width = params['band_width'] * scale
+    band_offset = params['band_offset'] * scale
+    spacing = params['spacing'] * scale
+    hatch_angle = params['angle']
+    jitter_pos = params['jitter_pos'] * scale
+    jitter_angle = params['jitter_angle']
+    band_width_jitter = params.get('band_width_jitter', 0.0)
+    wiggle = params.get('wiggle', 0.0) * scale
+
+    c_o = hw * 1.0
+    r_o = c_o + hw
+
+    def tp(px, py):
+        rx, ry = _rotate_vec((px, py), rot_deg)
+        return (xloc + rx, yloc + ry)
+
+    oc = tp(c_o, c_o)
+
+    arc_start = 180 + rot_deg
+    arc_end = 270 + rot_deg
+
+    angles_to_draw = [hatch_angle]
+    if params.get('crosshatch'):
+        angles_to_draw.append(hatch_angle + params.get('crosshatch_angle', 90))
+
+    # Hatch band positioned relative to outer arc
+    band_outer = r_o - band_offset
+    band_inner = band_outer - band_width
+    band_mid = (band_inner + band_outer) / 2
+    band_mid = max(1, min(band_mid, r_o - 1))
+
+    arc_length = (math.pi / 2) * band_mid
+    num_samples = max(4, int(arc_length / spacing))
+
+    for base_angle in angles_to_draw:
+        for i in range(num_samples):
+            frac = (i + 0.5) / num_samples
+            angle_deg = arc_start + frac * (arc_end - arc_start)
+            angle_rad = math.radians(angle_deg)
+
+            outward_normal = (math.cos(angle_rad), math.sin(angle_rad))
+            if _dot(outward_normal, light_dir) >= 0:
+                continue
+
+            base_x = oc[0] + math.cos(angle_rad) * band_mid
+            base_y = oc[1] + math.sin(angle_rad) * band_mid
+
+            angle_jitter = random.uniform(-jitter_angle, jitter_angle)
+            hatch_dir = _rotate_vec(outward_normal, base_angle + angle_jitter)
+
+            width_mult = 1.0 + random.uniform(-band_width_jitter, band_width_jitter)
+            half_len = (band_width * 0.6) * width_mult
+
+            tangent = (-math.sin(angle_rad), math.cos(angle_rad))
+            pos_jitter_val = random.uniform(-jitter_pos, jitter_pos)
+            base_x += tangent[0] * pos_jitter_val
+            base_y += tangent[1] * pos_jitter_val
+
+            x1 = base_x - hatch_dir[0] * half_len
+            y1 = base_y - hatch_dir[1] * half_len
+            x2 = base_x + hatch_dir[0] * half_len
+            y2 = base_y + hatch_dir[1] * half_len
+
+            _draw_hatch_line(drawing, x1, y1, x2, y2, hatch_dir, wiggle, sw,
+                            pipe_polygon, occlusion_polygon)
+
+
 def draw_reducer_directional_shading(drawing, ch, xloc, yloc, light_dir, sw, params,
                                      pipe_polygon=None, occlusion_polygon=None):
     """Draw directional hatch marks on the shadow side of a reducer tile.
@@ -1894,26 +2534,27 @@ def draw_reducer_directional_shading(drawing, ch, xloc, yloc, light_dir, sw, par
 
 
 def draw_cross_directional_shading(drawing, xloc, yloc, light_dir, sw, params,
-                                    pipe_polygon=None, occlusion_polygon=None):
+                                    pipe_polygon=None, occlusion_polygon=None, half_width=30):
     """Draw directional hatch marks on the shadow sides of a cross junction."""
-    band_width = params['band_width']
-    band_offset = params['band_offset']
+    scale = half_width / 30.0
+    band_width = params['band_width'] * scale
+    band_offset = params['band_offset'] * scale
     spacing = params['spacing']
     hatch_angle = params['angle']
-    jitter_pos = params['jitter_pos']
+    jitter_pos = params['jitter_pos'] * scale
     jitter_angle = params['jitter_angle']
     band_width_jitter = params.get('band_width_jitter', 0.0)
-    wiggle = params.get('wiggle', 0.0)
+    wiggle = params.get('wiggle', 0.0) * scale
 
     # Draw shading on each arm based on light direction
     # Each arm is treated like a tube segment
 
     arms = [
         # (arm_direction, tangent, extent_start, extent_end)
-        ('N', (0, -1), -30, -50),  # North arm: y from -30 to -50
-        ('S', (0, 1), 30, 50),     # South arm: y from 30 to 50
-        ('E', (1, 0), 30, 50),     # East arm: x from 30 to 50
-        ('W', (-1, 0), -30, -50),  # West arm: x from -30 to -50
+        ('N', (0, -1), -half_width, -50),  # North arm: y from -hw to -50
+        ('S', (0, 1), half_width, 50),     # South arm: y from hw to 50
+        ('E', (1, 0), half_width, 50),     # East arm: x from hw to 50
+        ('W', (-1, 0), -half_width, -50),  # West arm: x from -hw to -50
     ]
 
     for arm_dir, tangent, start, end in arms:
@@ -1930,7 +2571,8 @@ def draw_cross_directional_shading(drawing, xloc, yloc, light_dir, sw, params,
         dot_right = _dot(normal_right, light_dir)
         shadow_normal = normal_left if dot_left < dot_right else normal_right
 
-        band_center_dist = 30 - band_offset - band_width / 2
+        band_center_dist = half_width - band_offset - band_width / 2
+        band_center_dist = max(1, band_center_dist)
 
         # Calculate arm center and draw hatches
         arm_length = abs(end - start)
@@ -1971,21 +2613,22 @@ def draw_cross_directional_shading(drawing, xloc, yloc, light_dir, sw, params,
 
 
 def draw_tee_directional_shading(drawing, ch, xloc, yloc, light_dir, sw, params,
-                                  pipe_polygon=None, occlusion_polygon=None):
+                                  pipe_polygon=None, occlusion_polygon=None, half_width=30):
     """Draw directional hatch marks on the shadow sides of a tee junction."""
     rotations = {'T': 0, 'B': 180, 'E': 90, 'W': 270}
     rot_deg = rotations.get(ch)
     if rot_deg is None:
         return
 
-    band_width = params['band_width']
-    band_offset = params['band_offset']
+    scale = half_width / 30.0
+    band_width = params['band_width'] * scale
+    band_offset = params['band_offset'] * scale
     spacing = params['spacing']
     hatch_angle = params['angle']
-    jitter_pos = params['jitter_pos']
+    jitter_pos = params['jitter_pos'] * scale
     jitter_angle = params['jitter_angle']
     band_width_jitter = params.get('band_width_jitter', 0.0)
-    wiggle = params.get('wiggle', 0.0)
+    wiggle = params.get('wiggle', 0.0) * scale
 
     def transform_vec(vx, vy):
         return _rotate_vec((vx, vy), rot_deg)
@@ -1993,9 +2636,9 @@ def draw_tee_directional_shading(drawing, ch, xloc, yloc, light_dir, sw, params,
     # Base T shape has 3 arms: N, E, W (closed S)
     # We rotate based on ch
     base_arms = [
-        ((0, -1), (-30, -50)),   # North arm: y from -30 to -50
-        ((1, 0), (30, 50)),      # East arm: x from 30 to 50
-        ((-1, 0), (-50, -30)),   # West arm: x from -50 to -30
+        ((0, -1), (-half_width, -50)),   # North arm: y from -hw to -50
+        ((1, 0), (half_width, 50)),      # East arm: x from hw to 50
+        ((-1, 0), (-50, -half_width)),   # West arm: x from -50 to -hw
     ]
 
     for tangent, (start, end) in base_arms:
@@ -2018,7 +2661,8 @@ def draw_tee_directional_shading(drawing, ch, xloc, yloc, light_dir, sw, params,
         dot_right = _dot(rot_normal_right, light_dir)
         shadow_normal = rot_normal_left if dot_left < dot_right else rot_normal_right
 
-        band_center_dist = 30 - band_offset - band_width / 2
+        band_center_dist = half_width - band_offset - band_width / 2
+        band_center_dist = max(1, band_center_dist)
 
         arm_length = abs(end - start)
         num_hatches = max(1, int(arm_length / spacing))
@@ -2234,12 +2878,28 @@ def render_svg(grid, stroke_width, shading_style, shading_stroke_width,
                 draw_sized_corner_outline(d, ch, xloc, yloc, 12, occlusion_poly, stroke_width)
             elif ch in ('tr', 't7', 'tj', 'tL'):
                 draw_sized_corner_outline(d, ch, xloc, yloc, 5, occlusion_poly, stroke_width)
+            elif ch in _DODGE_PARAMS:
+                draw_dodge_outline(d, ch, xloc, yloc, occlusion_poly, stroke_width)
+            elif ch in _CHAMFER_PARAMS:
+                draw_chamfer_outline(d, ch, xloc, yloc, occlusion_poly, stroke_width)
+            elif ch in _TEARDROP_PARAMS:
+                draw_teardrop_outline(d, ch, xloc, yloc, occlusion_poly, stroke_width)
             elif ch in ('Rv', 'RV', 'Tv', 'TV', 'Rh', 'RH', 'Th', 'TH'):
                 draw_reducer_outline(d, ch, xloc, yloc, occlusion_poly, stroke_width)
-            elif ch == 'X':
-                draw_cross_outline(d, xloc, yloc, occlusion_poly, stroke_width)
-            elif ch in ('T', 'B', 'E', 'W'):
-                draw_tee_outline(d, ch, xloc, yloc, occlusion_poly, stroke_width)
+            elif ch in ('X', 'nX', 'tX'):
+                hw = 30 if ch == 'X' else (12 if ch == 'nX' else 5)
+                draw_cross_outline(d, xloc, yloc, occlusion_poly, stroke_width, half_width=hw)
+            elif ch in ('T', 'B', 'E', 'W', 'nT', 'nB', 'nE', 'nW', 'tT', 'tB', 'tE', 'tW'):
+                if ch in ('T', 'B', 'E', 'W'):
+                    hw = 30
+                    base_ch = ch
+                elif ch.startswith('n'):
+                    hw = 12
+                    base_ch = ch[1:]
+                else:
+                    hw = 5
+                    base_ch = ch[1:]
+                draw_tee_outline(d, base_ch, xloc, yloc, occlusion_poly, stroke_width, half_width=hw)
             elif ch in CROSSOVER_TUBES:
                 # Crossover: draw with depth ordering (vertical on top of horizontal)
                 v_ch, h_ch = CROSSOVER_TUBES[ch]
@@ -2280,15 +2940,36 @@ def render_svg(grid, stroke_width, shading_style, shading_stroke_width,
                 elif ch in ('tr', 't7', 'tj', 'tL'):
                     draw_sized_corner_directional_shading(d, ch, xloc, yloc, 5, light_dir, shading_stroke_width, params,
                                                           pipe_polygon=pipe_poly, occlusion_polygon=occlusion_poly)
+                elif ch in _DODGE_PARAMS:
+                    draw_dodge_directional_shading(d, ch, xloc, yloc, light_dir, shading_stroke_width, params,
+                                                    pipe_polygon=pipe_poly, occlusion_polygon=occlusion_poly)
+                elif ch in _CHAMFER_PARAMS:
+                    draw_chamfer_directional_shading(d, ch, xloc, yloc, light_dir, shading_stroke_width, params,
+                                                      pipe_polygon=pipe_poly, occlusion_polygon=occlusion_poly)
+                elif ch in _TEARDROP_PARAMS:
+                    draw_teardrop_directional_shading(d, ch, xloc, yloc, light_dir, shading_stroke_width, params,
+                                                       pipe_polygon=pipe_poly, occlusion_polygon=occlusion_poly)
                 elif ch in ('Rv', 'RV', 'Tv', 'TV', 'Rh', 'RH', 'Th', 'TH'):
                     draw_reducer_directional_shading(d, ch, xloc, yloc, light_dir, shading_stroke_width, params,
                                                      pipe_polygon=pipe_poly, occlusion_polygon=occlusion_poly)
-                elif ch == 'X':
+                elif ch in ('X', 'nX', 'tX'):
+                    hw = 30 if ch == 'X' else (12 if ch == 'nX' else 5)
                     draw_cross_directional_shading(d, xloc, yloc, light_dir, shading_stroke_width, params,
-                                                   pipe_polygon=pipe_poly, occlusion_polygon=occlusion_poly)
-                elif ch in ('T', 'B', 'E', 'W'):
-                    draw_tee_directional_shading(d, ch, xloc, yloc, light_dir, shading_stroke_width, params,
-                                                 pipe_polygon=pipe_poly, occlusion_polygon=occlusion_poly)
+                                                   pipe_polygon=pipe_poly, occlusion_polygon=occlusion_poly,
+                                                   half_width=hw)
+                elif ch in ('T', 'B', 'E', 'W', 'nT', 'nB', 'nE', 'nW', 'tT', 'tB', 'tE', 'tW'):
+                    if ch in ('T', 'B', 'E', 'W'):
+                        hw = 30
+                        base_ch = ch
+                    elif ch.startswith('n'):
+                        hw = 12
+                        base_ch = ch[1:]
+                    else:
+                        hw = 5
+                        base_ch = ch[1:]
+                    draw_tee_directional_shading(d, base_ch, xloc, yloc, light_dir, shading_stroke_width, params,
+                                                 pipe_polygon=pipe_poly, occlusion_polygon=occlusion_poly,
+                                                 half_width=hw)
                 elif ch in CROSSOVER_TUBES:
                     v_ch, h_ch = CROSSOVER_TUBES[ch]
                     v_poly = get_tube_polygon(v_ch, xloc, yloc)
