@@ -86,6 +86,8 @@ with st.sidebar:
         w_chamfer = st.slider("Chamfered Corners", 0.0, 5.0, 0.0, 0.1)
         w_teardrop = st.slider("Teardrop Corners", 0.0, 5.0, 0.0, 0.1)
         w_dodge = st.slider("Dodge/Zigzag", 0.0, 5.0, 0.0, 0.1)
+        w_diagonal = st.slider("Diagonal Pipes", 0.0, 5.0, 0.0, 0.1,
+                               help="Diagonal pipes (narrow/tiny only). Set > 0 to enable.")
         w_junction = st.slider("Junctions", 0.1, 5.0, 2.0, 0.1)
         w_reducer = st.slider("Reducers", 0.1, 5.0, 1.0, 0.1)
 
@@ -93,7 +95,7 @@ with st.sidebar:
         'size': {'medium': w_medium, 'narrow': w_narrow, 'tiny': w_tiny},
         'shape': {'straight': w_straight, 'corner': w_corner,
                   'chamfer': w_chamfer, 'teardrop': w_teardrop,
-                  'dodge': w_dodge,
+                  'dodge': w_dodge, 'diagonal': w_diagonal,
                   'junction': w_junction, 'reducer': w_reducer},
     }
 

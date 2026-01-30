@@ -288,6 +288,364 @@ def get_reducer_polygon(ch, xloc, yloc):
         return unary_union([pipe_poly, flange1, flange2])
 
 
+# ============================================================================
+# DIAGONAL PIPES
+# ============================================================================
+
+_SQRT2 = math.sqrt(2)
+_INV_SQRT2 = 1.0 / _SQRT2
+
+# Diagonal straight params: char -> (direction, half_width)
+# 'a' = ascending (SW->NE, like /), 'd' = descending (NW->SE, like \)
+_DIAG_PARAMS = {
+    'nDa': ('a', 12), 'nDd': ('d', 12),
+    'tDa': ('a', 5),  'tDd': ('d', 5),
+}
+
+# Adapter params: char -> (shape, rotation_deg, half_width)
+# Shape A: vertical cardinal -> diagonal (base: S->NE)
+# Shape B: horizontal cardinal -> diagonal (base: W->NE)
+_ADAPTER_PARAMS = {
+    # Shape A (narrow)
+    'naSne': ('A', 0, 12), 'naWse': ('A', 90, 12),
+    'naNsw': ('A', 180, 12), 'naEnw': ('A', 270, 12),
+    # Shape A (tiny)
+    'taSne': ('A', 0, 5), 'taWse': ('A', 90, 5),
+    'taNsw': ('A', 180, 5), 'taEnw': ('A', 270, 5),
+    # Shape B (narrow)
+    'naWne': ('B', 0, 12), 'naNse': ('B', 90, 12),
+    'naEsw': ('B', 180, 12), 'naSnw': ('B', 270, 12),
+    # Shape B (tiny)
+    'taWne': ('B', 0, 5), 'taNse': ('B', 90, 5),
+    'taEsw': ('B', 180, 5), 'taSnw': ('B', 270, 5),
+}
+
+
+def get_diagonal_polygon(ch, xloc, yloc):
+    """Return parallelogram polygon for a diagonal straight pipe."""
+    direction, hw = _DIAG_PARAMS[ch]
+    offset = hw * _INV_SQRT2
+
+    if direction == 'a':  # ascending SW->NE
+        pts = [
+            (xloc - 50 - offset, yloc + 50 - offset),  # SW inner (NW side)
+            (xloc - 50 + offset, yloc + 50 + offset),  # SW outer (SE side)
+            (xloc + 50 + offset, yloc - 50 + offset),  # NE outer (SE side)
+            (xloc + 50 - offset, yloc - 50 - offset),  # NE inner (NW side)
+        ]
+    else:  # descending NW->SE
+        pts = [
+            (xloc - 50 - offset, yloc - 50 + offset),  # NW outer (SW side)
+            (xloc + 50 - offset, yloc + 50 + offset),  # SE outer (SW side)
+            (xloc + 50 + offset, yloc + 50 - offset),  # SE inner (NE side)
+            (xloc - 50 + offset, yloc - 50 - offset),  # NW inner (NE side)
+        ]
+
+    poly = Polygon(pts)
+    poly = poly.buffer(0)
+    if not poly.is_valid:
+        return None
+    return poly
+
+
+def draw_diagonal_outline(drawing, ch, xloc, yloc, occlusion_poly, sw):
+    """Draw outline for a diagonal straight pipe."""
+    direction, hw = _DIAG_PARAMS[ch]
+    offset = hw * _INV_SQRT2
+
+    if direction == 'a':
+        # NW wall (inner)
+        clip_and_draw_line(drawing,
+                           xloc - 50 - offset, yloc + 50 - offset,
+                           xloc + 50 - offset, yloc - 50 - offset,
+                           occlusion_poly, sw)
+        # SE wall (outer)
+        clip_and_draw_line(drawing,
+                           xloc - 50 + offset, yloc + 50 + offset,
+                           xloc + 50 + offset, yloc - 50 + offset,
+                           occlusion_poly, sw)
+    else:
+        # SW wall (outer)
+        clip_and_draw_line(drawing,
+                           xloc - 50 - offset, yloc - 50 + offset,
+                           xloc + 50 - offset, yloc + 50 + offset,
+                           occlusion_poly, sw)
+        # NE wall (inner)
+        clip_and_draw_line(drawing,
+                           xloc - 50 + offset, yloc - 50 - offset,
+                           xloc + 50 + offset, yloc + 50 - offset,
+                           occlusion_poly, sw)
+
+
+def draw_diagonal_directional_shading(drawing, ch, xloc, yloc, light_dir, sw, params,
+                                       pipe_polygon=None, occlusion_polygon=None):
+    """Draw directional hatch marks on a diagonal straight pipe."""
+    direction, hw = _DIAG_PARAMS[ch]
+
+    if direction == 'a':
+        tangent = (_INV_SQRT2, -_INV_SQRT2)
+        normal_left = (-_INV_SQRT2, -_INV_SQRT2)   # NW side
+        normal_right = (_INV_SQRT2, _INV_SQRT2)     # SE side
+    else:
+        tangent = (_INV_SQRT2, _INV_SQRT2)
+        normal_left = (_INV_SQRT2, -_INV_SQRT2)     # NE side
+        normal_right = (-_INV_SQRT2, _INV_SQRT2)    # SW side
+
+    scale = hw / 30
+    band_width = params['band_width'] * scale
+    band_offset = params['band_offset'] * scale
+    spacing = params['spacing'] * scale
+    hatch_angle = params['angle']
+    jitter_pos = params['jitter_pos'] * scale
+    jitter_angle = params['jitter_angle']
+    band_width_jitter = params.get('band_width_jitter', 0.0)
+    wiggle = params.get('wiggle', 0.0) * scale
+
+    dot_left = _dot(normal_left, light_dir)
+    dot_right = _dot(normal_right, light_dir)
+    shadow_normal = normal_left if dot_left < dot_right else normal_right
+    band_center_dist = hw - band_offset - band_width / 2
+
+    angles_to_draw = [hatch_angle]
+    if params.get('crosshatch'):
+        angles_to_draw.append(hatch_angle + params.get('crosshatch_angle', 90))
+
+    # Pipe diagonal length is 100*sqrt(2), sample along that
+    diag_length = 100 * _SQRT2
+    num_hatches = max(1, int(diag_length / spacing))
+    for base_angle in angles_to_draw:
+        for i in range(num_hatches + 1):
+            t = -diag_length / 2 + i * (diag_length / num_hatches)
+            t += random.uniform(-jitter_pos, jitter_pos)
+
+            base_x = xloc + tangent[0] * t + shadow_normal[0] * band_center_dist
+            base_y = yloc + tangent[1] * t + shadow_normal[1] * band_center_dist
+
+            angle = base_angle + random.uniform(-jitter_angle, jitter_angle)
+            hatch_dir = _rotate_vec(tangent, angle)
+
+            width_mult = 1.0 + random.uniform(-band_width_jitter, band_width_jitter)
+            half_len = (band_width * 0.6) * width_mult
+
+            x1 = base_x - hatch_dir[0] * half_len
+            y1 = base_y - hatch_dir[1] * half_len
+            x2 = base_x + hatch_dir[0] * half_len
+            y2 = base_y + hatch_dir[1] * half_len
+
+            _draw_hatch_line(drawing, x1, y1, x2, y2, hatch_dir, wiggle, sw,
+                            pipe_polygon, occlusion_polygon)
+
+
+def _adapter_base_polygon_A(hw):
+    """Compute base polygon vertices for shape A adapter (S->NE) in local coords."""
+    offset = hw * _INV_SQRT2
+    sqrt2_minus_1 = _SQRT2 - 1
+
+    return [
+        (-hw, 50),                              # S edge, west wall
+        (hw, 50),                               # S edge, east wall
+        (hw, hw * sqrt2_minus_1),               # outer miter
+        (50 + offset, -50 + offset),            # NE corner, SE wall
+        (50 - offset, -50 - offset),            # NE corner, NW wall
+        (-hw, hw * (1 - _SQRT2)),               # inner miter
+    ]
+
+
+def _adapter_base_polygon_B(hw):
+    """Compute base polygon vertices for shape B adapter (W->NE) in local coords."""
+    offset = hw * _INV_SQRT2
+
+    return [
+        (-50, -hw),                             # W edge, north wall
+        (-50, hw),                              # W edge, south wall
+        (0, hw),                                # south wall endpoint at center
+        (offset, offset),                       # SE diagonal wall start (chamfer)
+        (50 + offset, -50 + offset),            # NE corner, SE wall
+        (50 - offset, -50 - offset),            # NE corner, NW wall
+        (hw * (1 - _SQRT2), -hw),               # inner miter
+    ]
+
+
+def get_adapter_polygon(ch, xloc, yloc):
+    """Return polygon for an adapter tile (cardinal-to-diagonal bend)."""
+    shape, rot_deg, hw = _ADAPTER_PARAMS[ch]
+
+    if shape == 'A':
+        local_pts = _adapter_base_polygon_A(hw)
+    else:
+        local_pts = _adapter_base_polygon_B(hw)
+
+    cos_r = math.cos(math.radians(rot_deg))
+    sin_r = math.sin(math.radians(rot_deg))
+
+    world_pts = []
+    for px, py in local_pts:
+        rx = px * cos_r - py * sin_r
+        ry = px * sin_r + py * cos_r
+        world_pts.append((xloc + rx, yloc + ry))
+
+    poly = Polygon(world_pts)
+    poly = poly.buffer(0)
+    if not poly.is_valid:
+        return None
+    return poly
+
+
+def draw_adapter_outline(drawing, ch, xloc, yloc, occlusion_poly, sw):
+    """Draw outline for an adapter tile."""
+    shape, rot_deg, hw = _ADAPTER_PARAMS[ch]
+
+    if shape == 'A':
+        local_pts = _adapter_base_polygon_A(hw)
+    else:
+        local_pts = _adapter_base_polygon_B(hw)
+
+    cos_r = math.cos(math.radians(rot_deg))
+    sin_r = math.sin(math.radians(rot_deg))
+
+    def to_world(px, py):
+        rx = px * cos_r - py * sin_r
+        ry = px * sin_r + py * cos_r
+        return (xloc + rx, yloc + ry)
+
+    wp = [to_world(px, py) for px, py in local_pts]
+    n = len(wp)
+
+    # Draw each edge of the polygon as a clipped line segment
+    for i in range(n):
+        j = (i + 1) % n
+        clip_and_draw_line(drawing, wp[i][0], wp[i][1], wp[j][0], wp[j][1],
+                           occlusion_poly, sw)
+
+
+def draw_adapter_directional_shading(drawing, ch, xloc, yloc, light_dir, sw, params,
+                                      pipe_polygon=None, occlusion_polygon=None):
+    """Draw directional hatch marks on an adapter tile.
+
+    Two sections: cardinal half (straight) and diagonal half, each with its own tangent.
+    """
+    shape, rot_deg, hw = _ADAPTER_PARAMS[ch]
+
+    cos_r = math.cos(math.radians(rot_deg))
+    sin_r = math.sin(math.radians(rot_deg))
+
+    def to_world(px, py):
+        rx = px * cos_r - py * sin_r
+        ry = px * sin_r + py * cos_r
+        return (xloc + rx, yloc + ry)
+
+    def rot_dir(dx, dy):
+        return (dx * cos_r - dy * sin_r, dx * sin_r + dy * cos_r)
+
+    scale = hw / 30
+    band_width = params['band_width'] * scale
+    band_offset = params['band_offset'] * scale
+    spacing = params['spacing'] * scale
+    hatch_angle = params['angle']
+    jitter_pos = params['jitter_pos'] * scale
+    jitter_angle = params['jitter_angle']
+    band_width_jitter = params.get('band_width_jitter', 0.0)
+    wiggle = params.get('wiggle', 0.0) * scale
+
+    angles_to_draw = [hatch_angle]
+    if params.get('crosshatch'):
+        angles_to_draw.append(hatch_angle + params.get('crosshatch_angle', 90))
+
+    band_center_dist = hw - band_offset - band_width / 2
+
+    # Section 1: cardinal half (base orientation for A: vertical from y=50 to y=0)
+    if shape == 'A':
+        local_tangent1 = (0, -1)  # pointing north (toward center)
+        local_n1_left = (-1, 0)
+        local_n1_right = (1, 0)
+        section_length1 = 50
+    else:
+        local_tangent1 = (1, 0)   # pointing east (toward center)
+        local_n1_left = (0, -1)
+        local_n1_right = (0, 1)
+        section_length1 = 50
+
+    tangent1 = rot_dir(*local_tangent1)
+    n1_left = rot_dir(*local_n1_left)
+    n1_right = rot_dir(*local_n1_right)
+
+    dot1_l = _dot(n1_left, light_dir)
+    dot1_r = _dot(n1_right, light_dir)
+    shadow1 = n1_left if dot1_l < dot1_r else n1_right
+
+    # Section 2: diagonal half (base: toward NE corner)
+    local_tangent2 = (_INV_SQRT2, -_INV_SQRT2)
+    local_n2_left = (-_INV_SQRT2, -_INV_SQRT2)
+    local_n2_right = (_INV_SQRT2, _INV_SQRT2)
+
+    tangent2 = rot_dir(*local_tangent2)
+    n2_left = rot_dir(*local_n2_left)
+    n2_right = rot_dir(*local_n2_right)
+
+    dot2_l = _dot(n2_left, light_dir)
+    dot2_r = _dot(n2_right, light_dir)
+    shadow2 = n2_left if dot2_l < dot2_r else n2_right
+
+    diag_length = 50 * _SQRT2  # half the cell diagonal
+
+    # Draw section 1 (cardinal half)
+    num_hatches1 = max(1, int(section_length1 / spacing))
+    if shape == 'A':
+        section1_center = to_world(0, 25)  # midpoint of vertical stub
+    else:
+        section1_center = to_world(-25, 0)  # midpoint of horizontal stub
+
+    for base_angle in angles_to_draw:
+        for i in range(num_hatches1 + 1):
+            t = -section_length1 / 2 + i * (section_length1 / num_hatches1)
+            t += random.uniform(-jitter_pos, jitter_pos)
+
+            base_x = section1_center[0] + tangent1[0] * t + shadow1[0] * band_center_dist
+            base_y = section1_center[1] + tangent1[1] * t + shadow1[1] * band_center_dist
+
+            angle = base_angle + random.uniform(-jitter_angle, jitter_angle)
+            hatch_dir = _rotate_vec(tangent1, angle)
+
+            width_mult = 1.0 + random.uniform(-band_width_jitter, band_width_jitter)
+            half_len = (band_width * 0.6) * width_mult
+
+            x1 = base_x - hatch_dir[0] * half_len
+            y1 = base_y - hatch_dir[1] * half_len
+            x2 = base_x + hatch_dir[0] * half_len
+            y2 = base_y + hatch_dir[1] * half_len
+
+            _draw_hatch_line(drawing, x1, y1, x2, y2, hatch_dir, wiggle, sw,
+                            pipe_polygon, occlusion_polygon)
+
+    # Draw section 2 (diagonal half)
+    num_hatches2 = max(1, int(diag_length / spacing))
+    diag_center = to_world(25 * _INV_SQRT2 * _SQRT2, -25 * _INV_SQRT2 * _SQRT2)
+    # Simpler: center of the diagonal half is at (25, -25) in local coords
+    diag_center = to_world(25, -25)
+
+    for base_angle in angles_to_draw:
+        for i in range(num_hatches2 + 1):
+            t = -diag_length / 2 + i * (diag_length / num_hatches2)
+            t += random.uniform(-jitter_pos, jitter_pos)
+
+            base_x = diag_center[0] + tangent2[0] * t + shadow2[0] * band_center_dist
+            base_y = diag_center[1] + tangent2[1] * t + shadow2[1] * band_center_dist
+
+            angle = base_angle + random.uniform(-jitter_angle, jitter_angle)
+            hatch_dir = _rotate_vec(tangent2, angle)
+
+            width_mult = 1.0 + random.uniform(-band_width_jitter, band_width_jitter)
+            half_len = (band_width * 0.6) * width_mult
+
+            x1 = base_x - hatch_dir[0] * half_len
+            y1 = base_y - hatch_dir[1] * half_len
+            x2 = base_x + hatch_dir[0] * half_len
+            y2 = base_y + hatch_dir[1] * half_len
+
+            _draw_hatch_line(drawing, x1, y1, x2, y2, hatch_dir, wiggle, sw,
+                            pipe_polygon, occlusion_polygon)
+
+
 # Dodge tile params: (orientation, sign, half_width)
 _DODGE_PARAMS = {
     'z>':  ('v', +1, 30), 'z<':  ('v', -1, 30),
@@ -661,6 +1019,14 @@ def get_pipe_polygon(ch, xloc, yloc):
     # Teardrop elbows
     elif ch in _TEARDROP_PARAMS:
         return get_teardrop_polygon(ch, xloc, yloc)
+
+    # Diagonal straights
+    elif ch in _DIAG_PARAMS:
+        return get_diagonal_polygon(ch, xloc, yloc)
+
+    # Diagonal adapters
+    elif ch in _ADAPTER_PARAMS:
+        return get_adapter_polygon(ch, xloc, yloc)
 
     # Crossovers (all sizes)
     elif ch in CROSSOVER_TUBES:
@@ -1389,6 +1755,16 @@ def draw_reducer_outline(drawing, ch, xloc, yloc, occlusion_poly, sw):
 # Port sizes: 't' = tiny (±8), 'n' = narrow (±15), 'm' = medium (±30)
 # None = no opening (closed)
 
+# Direction system for 8-neighbor WFC
+DIRECTION_OFFSETS = {
+    'N': (0, -1), 'S': (0, 1), 'E': (1, 0), 'W': (-1, 0),
+    'NE': (1, -1), 'NW': (-1, -1), 'SE': (1, 1), 'SW': (-1, 1),
+}
+OPPOSITE = {
+    'N': 'S', 'S': 'N', 'E': 'W', 'W': 'E',
+    'NE': 'SW', 'SW': 'NE', 'NW': 'SE', 'SE': 'NW',
+}
+
 PORTS = {
     # Medium-width pipes (current default, ±30 walls)
     'r': {'S': 'm', 'E': 'm'},
@@ -1477,6 +1853,32 @@ PORTS = {
     # Horizontal reducers (narrow↔tiny)
     'Th': {'E': 'n', 'W': 't'},          # Narrow-to-tiny horizontal (narrow on right)
     'TH': {'E': 't', 'W': 'n'},          # Tiny-to-narrow horizontal
+
+    # Diagonal straights (narrow and tiny only — medium too wide for 45°)
+    'nDa': {'SW': 'n', 'NE': 'n'},        # Narrow ascending (SW→NE)
+    'nDd': {'NW': 'n', 'SE': 'n'},        # Narrow descending (NW→SE)
+    'tDa': {'SW': 't', 'NE': 't'},        # Tiny ascending
+    'tDd': {'NW': 't', 'SE': 't'},        # Tiny descending
+
+    # Adapters: shape A (vertical cardinal → diagonal)
+    'naSne': {'S': 'n', 'NE': 'n'},       # S→NE narrow
+    'naWse': {'W': 'n', 'SE': 'n'},       # W→SE narrow
+    'naNsw': {'N': 'n', 'SW': 'n'},       # N→SW narrow
+    'naEnw': {'E': 'n', 'NW': 'n'},       # E→NW narrow
+    'taSne': {'S': 't', 'NE': 't'},       # S→NE tiny
+    'taWse': {'W': 't', 'SE': 't'},       # W→SE tiny
+    'taNsw': {'N': 't', 'SW': 't'},       # N→SW tiny
+    'taEnw': {'E': 't', 'NW': 't'},       # E→NW tiny
+
+    # Adapters: shape B (horizontal cardinal → diagonal)
+    'naWne': {'W': 'n', 'NE': 'n'},       # W→NE narrow
+    'naNse': {'N': 'n', 'SE': 'n'},       # N→SE narrow
+    'naEsw': {'E': 'n', 'SW': 'n'},       # E→SW narrow
+    'naSnw': {'S': 'n', 'NW': 'n'},       # S→NW narrow
+    'taWne': {'W': 't', 'NE': 't'},       # W→NE tiny
+    'taNse': {'N': 't', 'SE': 't'},       # N→SE tiny
+    'taEsw': {'E': 't', 'SW': 't'},       # E→SW tiny
+    'taSnw': {'S': 't', 'NW': 't'},       # S→NW tiny
 }
 
 ALL_CHARS = set(PORTS.keys())
@@ -1490,10 +1892,12 @@ for _ch in ['|', '-', 'r', '7', 'j', 'L', '+', 'X', 'T', 'B', 'E', 'W',
             'z>', 'z<', 'z^', 'zv', 'cr', 'c7', 'cj', 'cL', 'dr', 'd7', 'dj', 'dL']:
     TILE_SIZE[_ch] = 'medium'
 for _ch in ['i', '=', 'nr', 'n7', 'nj', 'nL', 'nX', 'nT', 'nB', 'nE', 'nW',
-            'nz>', 'nz<', 'nz^', 'nzv', 'ncr', 'nc7', 'ncj', 'ncL', 'ndr', 'nd7', 'ndj', 'ndL']:
+            'nz>', 'nz<', 'nz^', 'nzv', 'ncr', 'nc7', 'ncj', 'ncL', 'ndr', 'nd7', 'ndj', 'ndL',
+            'nDa', 'nDd', 'naSne', 'naWse', 'naNsw', 'naEnw', 'naWne', 'naNse', 'naEsw', 'naSnw']:
     TILE_SIZE[_ch] = 'narrow'
 for _ch in ['!', '.', 'tr', 't7', 'tj', 'tL', 'tX', 'tT', 'tB', 'tE', 'tW',
-            'tz>', 'tz<', 'tz^', 'tzv', 'tcr', 'tc7', 'tcj', 'tcL', 'tdr', 'td7', 'tdj', 'tdL']:
+            'tz>', 'tz<', 'tz^', 'tzv', 'tcr', 'tc7', 'tcj', 'tcL', 'tdr', 'td7', 'tdj', 'tdL',
+            'tDa', 'tDd', 'taSne', 'taWse', 'taNsw', 'taEnw', 'taWne', 'taNse', 'taEsw', 'taSnw']:
     TILE_SIZE[_ch] = 'tiny'
 for _ch in ['Rv', 'RV', 'Rh', 'RH']:
     TILE_SIZE[_ch] = 'reducer_mn'
@@ -1525,6 +1929,8 @@ for _ch in ['cr', 'c7', 'cj', 'cL', 'ncr', 'nc7', 'ncj', 'ncL', 'tcr', 'tc7', 't
     TILE_SHAPE[_ch] = 'chamfer'
 for _ch in ['dr', 'd7', 'dj', 'dL', 'ndr', 'nd7', 'ndj', 'ndL', 'tdr', 'td7', 'tdj', 'tdL']:
     TILE_SHAPE[_ch] = 'teardrop'
+for _ch in list(_DIAG_PARAMS.keys()) + list(_ADAPTER_PARAMS.keys()):
+    TILE_SHAPE[_ch] = 'diagonal'
 
 # Crossover tile → (vertical_tube_char, horizontal_tube_char)
 # Vertical tube is drawn on top, horizontal underneath
@@ -1544,9 +1950,11 @@ CROSSOVER_TUBES = {
 def get_tile_weight(ch, tile_weights):
     """Calculate tile weight from size and shape multipliers."""
     if tile_weights is None:
+        shape = TILE_SHAPE.get(ch)
+        if shape == 'diagonal':
+            return 0  # Diagonal tiles off by default
         if ch in CROSSOVER_TUBES:
             return 2
-        shape = TILE_SHAPE.get(ch)
         if shape in ('corner', 'chamfer', 'teardrop'):
             return 3
         return 1
@@ -1589,8 +1997,7 @@ def get_compatible_neighbors(ch, direction):
     OR
     - Neither has an opening (both closed)
     """
-    opposite = {'N': 'S', 'S': 'N', 'E': 'W', 'W': 'E'}
-    opp_dir = opposite[direction]
+    opp_dir = OPPOSITE[direction]
     ch_port_size = get_port_size(ch, direction)
     compatible = set()
     for candidate in ALL_CHARS:
@@ -1717,6 +2124,15 @@ def get_constrained_possibilities(possibilities, x, y, width, height):
         valid = {ch for ch in valid if not has_opening(ch, 'N')}
     if y == height - 1:
         valid = {ch for ch in valid if not has_opening(ch, 'S')}
+    # Diagonal edges — block port if neighbor cell would be out of bounds
+    if x == width - 1 or y == 0:
+        valid = {ch for ch in valid if not has_opening(ch, 'NE')}
+    if x == 0 or y == 0:
+        valid = {ch for ch in valid if not has_opening(ch, 'NW')}
+    if x == width - 1 or y == height - 1:
+        valid = {ch for ch in valid if not has_opening(ch, 'SE')}
+    if x == 0 or y == height - 1:
+        valid = {ch for ch in valid if not has_opening(ch, 'SW')}
     return valid
 
 
@@ -1730,26 +2146,15 @@ def propagate_constraints(poss_grid, width, height):
                     continue
                 current = poss_grid[x][y].copy()
                 current = get_constrained_possibilities(current, x, y, width, height)
-                if y > 0:
-                    valid_from_north = set()
-                    for n_ch in poss_grid[x][y-1]:
-                        valid_from_north |= find_s(n_ch)
-                    current &= valid_from_north
-                if y < height - 1:
-                    valid_from_south = set()
-                    for s_ch in poss_grid[x][y+1]:
-                        valid_from_south |= find_n(s_ch)
-                    current &= valid_from_south
-                if x > 0:
-                    valid_from_west = set()
-                    for w_ch in poss_grid[x-1][y]:
-                        valid_from_west |= find_e(w_ch)
-                    current &= valid_from_west
-                if x < width - 1:
-                    valid_from_east = set()
-                    for e_ch in poss_grid[x+1][y]:
-                        valid_from_east |= find_w(e_ch)
-                    current &= valid_from_east
+                # Check all 8 directions for neighbor compatibility
+                for direction, (dx, dy) in DIRECTION_OFFSETS.items():
+                    nx, ny = x + dx, y + dy
+                    if 0 <= nx < width and 0 <= ny < height:
+                        opp = OPPOSITE[direction]
+                        valid_from_neighbor = set()
+                        for n_ch in poss_grid[nx][ny]:
+                            valid_from_neighbor |= get_compatible_neighbors(n_ch, opp)
+                        current &= valid_from_neighbor
                 if current != poss_grid[x][y]:
                     poss_grid[x][y] = current
                     changed = True
@@ -1777,7 +2182,13 @@ def collapse_cell(poss_grid, x, y, tile_weights=None):
     possibilities = list(poss_grid[x][y])
     if possibilities:
         weights = [get_tile_weight(ch, tile_weights) for ch in possibilities]
-        chosen = random.choices(possibilities, weights=weights, k=1)[0]
+        # Filter out zero-weight tiles to prevent WFC stalls
+        filtered = [(ch, w) for ch, w in zip(possibilities, weights) if w > 0]
+        if not filtered:
+            # All remaining tiles have zero weight — treat as contradiction
+            return False
+        possibilities, weights = zip(*filtered)
+        chosen = random.choices(list(possibilities), weights=list(weights), k=1)[0]
         poss_grid[x][y] = {chosen}
         return True
     return False
@@ -2884,6 +3295,10 @@ def render_svg(grid, stroke_width, shading_style, shading_stroke_width,
                 draw_chamfer_outline(d, ch, xloc, yloc, occlusion_poly, stroke_width)
             elif ch in _TEARDROP_PARAMS:
                 draw_teardrop_outline(d, ch, xloc, yloc, occlusion_poly, stroke_width)
+            elif ch in _DIAG_PARAMS:
+                draw_diagonal_outline(d, ch, xloc, yloc, occlusion_poly, stroke_width)
+            elif ch in _ADAPTER_PARAMS:
+                draw_adapter_outline(d, ch, xloc, yloc, occlusion_poly, stroke_width)
             elif ch in ('Rv', 'RV', 'Tv', 'TV', 'Rh', 'RH', 'Th', 'TH'):
                 draw_reducer_outline(d, ch, xloc, yloc, occlusion_poly, stroke_width)
             elif ch in ('X', 'nX', 'tX'):
@@ -2949,6 +3364,12 @@ def render_svg(grid, stroke_width, shading_style, shading_stroke_width,
                 elif ch in _TEARDROP_PARAMS:
                     draw_teardrop_directional_shading(d, ch, xloc, yloc, light_dir, shading_stroke_width, params,
                                                        pipe_polygon=pipe_poly, occlusion_polygon=occlusion_poly)
+                elif ch in _DIAG_PARAMS:
+                    draw_diagonal_directional_shading(d, ch, xloc, yloc, light_dir, shading_stroke_width, params,
+                                                      pipe_polygon=pipe_poly, occlusion_polygon=occlusion_poly)
+                elif ch in _ADAPTER_PARAMS:
+                    draw_adapter_directional_shading(d, ch, xloc, yloc, light_dir, shading_stroke_width, params,
+                                                     pipe_polygon=pipe_poly, occlusion_polygon=occlusion_poly)
                 elif ch in ('Rv', 'RV', 'Tv', 'TV', 'Rh', 'RH', 'Th', 'TH'):
                     draw_reducer_directional_shading(d, ch, xloc, yloc, light_dir, shading_stroke_width, params,
                                                      pipe_polygon=pipe_poly, occlusion_polygon=occlusion_poly)
