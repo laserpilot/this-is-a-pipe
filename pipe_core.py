@@ -2253,6 +2253,13 @@ for _dir in DIRECTION_OFFSETS:
         ch for ch in ALL_CHARS if _dir not in PORTS.get(ch, {})
     )
 
+# Precomputed sets: tiles that HAVE an opening in each direction
+_HAS_OPENING = {}
+for _dir in DIRECTION_OFFSETS:
+    _HAS_OPENING[_dir] = frozenset(
+        ch for ch in ALL_CHARS if _dir in PORTS.get(ch, {})
+    )
+
 # Tile category mappings for weight system
 TILE_SIZE = {}
 for _ch in ['|', '-', 'r', '7', 'j', 'L', '+', 'X', 'T', 'B', 'E', 'W',
@@ -2484,24 +2491,29 @@ def create_possibility_grid(width, height):
     return [[ALL_CHARS.copy() for _ in range(height)] for _ in range(width)]
 
 
-def get_constrained_possibilities(possibilities, x, y, width, height):
+def get_constrained_possibilities(possibilities, x, y, width, height,
+                                   open_edges=None):
+    if open_edges is None:
+        open_edges = frozenset()
     valid = possibilities
-    if x == 0:
+    # Cardinal edges
+    if x == 0 and 'W' not in open_edges:
         valid = valid & _NO_OPENING['W']
-    if x == width - 1:
+    if x == width - 1 and 'E' not in open_edges:
         valid = valid & _NO_OPENING['E']
-    if y == 0:
+    if y == 0 and 'N' not in open_edges:
         valid = valid & _NO_OPENING['N']
-    if y == height - 1:
+    if y == height - 1 and 'S' not in open_edges:
         valid = valid & _NO_OPENING['S']
     # Diagonal edges — block port if neighbor cell would be out of bounds
-    if x == width - 1 or y == 0:
+    # and that boundary is not open
+    if (x == width - 1 and 'E' not in open_edges) or (y == 0 and 'N' not in open_edges):
         valid = valid & _NO_OPENING['NE']
-    if x == 0 or y == 0:
+    if (x == 0 and 'W' not in open_edges) or (y == 0 and 'N' not in open_edges):
         valid = valid & _NO_OPENING['NW']
-    if x == width - 1 or y == height - 1:
+    if (x == width - 1 and 'E' not in open_edges) or (y == height - 1 and 'S' not in open_edges):
         valid = valid & _NO_OPENING['SE']
-    if x == 0 or y == height - 1:
+    if (x == 0 and 'W' not in open_edges) or (y == height - 1 and 'S' not in open_edges):
         valid = valid & _NO_OPENING['SW']
     return valid
 
@@ -2632,7 +2644,8 @@ def find_min_entropy_cell(poss_grid, width, height):
     return None
 
 
-def collapse_cell(poss_grid, x, y, tile_weights=None, width=None, height=None):
+def collapse_cell(poss_grid, x, y, tile_weights=None, width=None, height=None,
+                  boost_port_dirs=None):
     possibilities = list(poss_grid[x][y])
     if not possibilities:
         return False
@@ -2669,6 +2682,17 @@ def collapse_cell(poss_grid, x, y, tile_weights=None, width=None, height=None):
             possibilities, weights = zip(*filtered)
     else:
         possibilities, weights = zip(*filtered)
+
+    # Boundary boost: increase weight of tiles with ports in specified directions
+    if boost_port_dirs:
+        boosted = []
+        for ch, w in zip(possibilities, weights):
+            tile_ports = PORTS.get(ch, {})
+            if any(d in tile_ports for d in boost_port_dirs):
+                boosted.append((ch, w * 3.0))
+            else:
+                boosted.append((ch, w))
+        possibilities, weights = zip(*boosted)
 
     chosen = random.choices(list(possibilities), weights=list(weights), k=1)[0]
     poss_grid[x][y] = {chosen}
@@ -2788,6 +2812,208 @@ def wave_function_collapse(width, height, tile_weights=None,
         return final_grid
 
     return None
+
+
+def _solve_stripe(width, height, tile_weights=None, max_attempts=200,
+                  progress_callback=None, open_edges=None,
+                  left_constraints=None):
+    """WFC solver for a single stripe with optional open edges and left-neighbor constraints.
+
+    Args:
+        open_edges: frozenset of directions ('W', 'E') that are open (connect to adjacent stripes)
+        left_constraints: list of tile chars for the column to the left (len=height), or None
+    """
+    max_backtracks = width * height * 3  # more generous for stripes
+    total_cells = width * height
+    for attempt in range(1, max_attempts + 1):
+        poss_grid = create_possibility_grid(width, height)
+
+        for x in range(width):
+            for y in range(height):
+                poss_grid[x][y] = get_constrained_possibilities(
+                    poss_grid[x][y], x, y, width, height,
+                    open_edges=open_edges)
+
+        # Apply left-neighbor constraints: column 0 must be compatible
+        # with the previous stripe's right column
+        if left_constraints:
+            for y in range(height):
+                left_tile = left_constraints[y]
+                # W neighbor compatibility
+                poss_grid[0][y] = poss_grid[0][y] & COMPAT_TABLE[left_tile]['E']
+                # NW diagonal neighbor (left_constraints[y-1] is NW of (0,y))
+                if y > 0:
+                    nw_tile = left_constraints[y - 1]
+                    poss_grid[0][y] = poss_grid[0][y] & COMPAT_TABLE[nw_tile]['SE']
+                # SW diagonal neighbor (left_constraints[y+1] is SW of (0,y))
+                if y < height - 1:
+                    sw_tile = left_constraints[y + 1]
+                    poss_grid[0][y] = poss_grid[0][y] & COMPAT_TABLE[sw_tile]['NE']
+
+                if len(poss_grid[0][y]) == 0:
+                    break  # contradiction from constraints
+            else:
+                # No break — check passed
+                if not propagate_constraints(poss_grid, width, height):
+                    continue
+                # Fall through to main loop
+                pass
+            if any(len(poss_grid[0][y]) == 0 for y in range(height)):
+                continue  # retry attempt
+
+        else:
+            if not propagate_constraints(poss_grid, width, height):
+                continue
+
+        stack = []
+        backtracks = 0
+        cells_collapsed = 0
+        success = True
+
+        while True:
+            cell = find_min_entropy_cell(poss_grid, width, height)
+            if cell is None:
+                break
+
+            x, y = cell
+            snapshot = [[c.copy() for c in row] for row in poss_grid]
+
+            # Determine boundary boost for this cell
+            boost_dirs = None
+            if open_edges:
+                bd = set()
+                if x == 0 and 'W' in open_edges:
+                    bd.add('W')
+                if x == width - 1 and 'E' in open_edges:
+                    bd.add('E')
+                if bd:
+                    boost_dirs = bd
+
+            if not collapse_cell(poss_grid, x, y, tile_weights,
+                                 width=width, height=height,
+                                 boost_port_dirs=boost_dirs):
+                recovered = _wfc_backtrack(
+                    stack, poss_grid, width, height, tile_weights)
+                if not recovered:
+                    success = False
+                    break
+                backtracks += 1
+                cells_collapsed = len(stack)
+                if backtracks > max_backtracks:
+                    success = False
+                    break
+                continue
+
+            chosen = next(iter(poss_grid[x][y]))
+            stack.append((snapshot, x, y, {chosen}))
+
+            if not propagate_constraints(poss_grid, width, height,
+                                          dirty_cells={(x, y)}):
+                recovered = _wfc_backtrack(
+                    stack, poss_grid, width, height, tile_weights)
+                if not recovered:
+                    success = False
+                    break
+                backtracks += 1
+                cells_collapsed = len(stack)
+                if backtracks > max_backtracks:
+                    success = False
+                    break
+                continue
+
+            cells_collapsed += 1
+            if progress_callback:
+                progress_callback(attempt, max_attempts,
+                                  cells_collapsed, total_cells, backtracks)
+
+        if not success:
+            continue
+
+        final_grid = [['' for _ in range(height)] for _ in range(width)]
+        for x in range(width):
+            for y in range(height):
+                if len(poss_grid[x][y]) == 1:
+                    final_grid[x][y] = next(iter(poss_grid[x][y]))
+                else:
+                    final_grid[x][y] = (random.choice(list(poss_grid[x][y]))
+                                        if poss_grid[x][y] else '+')
+
+        return final_grid
+
+    return None
+
+
+def wave_function_collapse_striped(width, height, stripe_width=8,
+                                    tile_weights=None, max_attempts=200,
+                                    progress_callback=None):
+    """Generate large grids by solving vertical stripes left-to-right.
+
+    Each stripe is an independent WFC problem with constrained left edge
+    matching the previous stripe. Much more scalable than full-grid WFC.
+
+    Stripe widths are randomized around the base stripe_width to avoid
+    visible regular seams.
+    """
+    final_grid = [['' for _ in range(height)] for _ in range(width)]
+
+    # Build randomized stripe boundaries
+    min_sw = max(4, stripe_width - 3)
+    max_sw = stripe_width + 3
+    stripe_starts = [0]
+    while stripe_starts[-1] < width:
+        sw = random.randint(min_sw, max_sw)
+        next_start = min(stripe_starts[-1] + sw, width)
+        # Don't leave a tiny sliver at the end
+        remaining = width - next_start
+        if 0 < remaining < 3:
+            next_start = width
+        stripe_starts.append(next_start)
+
+    for i in range(len(stripe_starts) - 1):
+        stripe_start = stripe_starts[i]
+        stripe_end = stripe_starts[i + 1]
+        sw = stripe_end - stripe_start
+
+        # Determine which edges are open (connect to adjacent stripes)
+        open_edges = set()
+        if stripe_start > 0:
+            open_edges.add('W')
+        if stripe_end < width:
+            open_edges.add('E')
+        open_edges = frozenset(open_edges)
+
+        # Left constraints from previous stripe's right column
+        left_constraints = None
+        if stripe_start > 0:
+            left_constraints = [final_grid[stripe_start - 1][y]
+                                for y in range(height)]
+
+        # Wrap progress callback to report overall grid progress
+        cells_offset = stripe_start * height
+        total_cells = width * height
+
+        def stripe_progress(attempt, max_attempts, cells, total, backtracks=0,
+                            _offset=cells_offset):
+            if progress_callback:
+                progress_callback(attempt, max_attempts,
+                                  _offset + cells, total_cells, backtracks)
+
+        stripe_grid = _solve_stripe(
+            sw, height, tile_weights=tile_weights,
+            max_attempts=max_attempts,
+            progress_callback=stripe_progress,
+            open_edges=open_edges,
+            left_constraints=left_constraints)
+
+        if stripe_grid is None:
+            return None  # stripe failed
+
+        # Copy into final grid
+        for x in range(sw):
+            for y in range(height):
+                final_grid[stripe_start + x][y] = stripe_grid[x][y]
+
+    return final_grid
 
 
 # ============================================================================

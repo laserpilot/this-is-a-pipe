@@ -106,6 +106,14 @@ with st.sidebar:
     grid_width = st.slider("Grid Width", 4, 40, 8)
     grid_height = st.slider("Grid Height", 4, 40, 8)
 
+    if grid_width > 16:
+        with st.expander("Advanced Generation"):
+            st.caption("Large grids use striped generation (width > 16)")
+            stripe_width = st.slider("Stripe Width", 4, 16, 8,
+                                     help="Base width of each stripe (randomized ±3)")
+    else:
+        stripe_width = 8
+
     st.header("View Settings")
     zoom_level = st.slider("Zoom", 25, 200, 100, 5, help="Zoom level (100% = fit to window)")
 
@@ -125,9 +133,16 @@ if 'grid' not in st.session_state or st.session_state.get('grid_dims') != curren
         wfc_progress.progress(pct, text="Attempt {} — {}/{} cells{}".format(
             attempt, cells, total, bt_text))
 
-    grid = pipe_core.wave_function_collapse(grid_width, grid_height,
-                                             tile_weights=tile_weights,
-                                             progress_callback=wfc_update)
+    if grid_width > 16:
+        grid = pipe_core.wave_function_collapse_striped(
+            grid_width, grid_height, stripe_width=stripe_width,
+            tile_weights=tile_weights,
+            progress_callback=wfc_update)
+    else:
+        grid = pipe_core.wave_function_collapse(
+            grid_width, grid_height,
+            tile_weights=tile_weights,
+            progress_callback=wfc_update)
     wfc_progress.empty()
     st.session_state.grid = grid
     st.session_state.grid_dims = current_dims
