@@ -88,6 +88,8 @@ with st.sidebar:
         w_dodge = st.slider("Dodge/Zigzag", 0.0, 5.0, 0.0, 0.1)
         w_diagonal = st.slider("Diagonal Pipes", 0.0, 5.0, 0.0, 0.1,
                                help="Diagonal pipes (narrow/tiny only). Set > 0 to enable.")
+        w_diag_endcap = st.slider("Diagonal Endcaps", 0.0, 5.0, 0.0, 0.1,
+                                   help="Dead-end caps for diagonal pipes. 0 = diagonals must connect.")
         w_junction = st.slider("Junctions", 0.1, 5.0, 2.0, 0.1)
         w_reducer = st.slider("Reducers", 0.1, 5.0, 1.0, 0.1)
 
@@ -96,6 +98,7 @@ with st.sidebar:
         'shape': {'straight': w_straight, 'corner': w_corner,
                   'chamfer': w_chamfer, 'teardrop': w_teardrop,
                   'dodge': w_dodge, 'diagonal': w_diagonal,
+                  'diagonal_endcap': w_diag_endcap,
                   'junction': w_junction, 'reducer': w_reducer},
     }
 
@@ -116,9 +119,11 @@ current_dims = (grid_width, grid_height)
 if 'grid' not in st.session_state or st.session_state.get('grid_dims') != current_dims:
     wfc_progress = st.progress(0, text="Generating pipe layout...")
 
-    def wfc_update(attempt, max_attempts, cells, total):
+    def wfc_update(attempt, max_attempts, cells, total, backtracks=0):
         pct = min(cells / total, 1.0)
-        wfc_progress.progress(pct, text="Attempt {} — {}/{} cells".format(attempt, cells, total))
+        bt_text = " ({} backtracks)".format(backtracks) if backtracks else ""
+        wfc_progress.progress(pct, text="Attempt {} — {}/{} cells{}".format(
+            attempt, cells, total, bt_text))
 
     grid = pipe_core.wave_function_collapse(grid_width, grid_height,
                                              tile_weights=tile_weights,

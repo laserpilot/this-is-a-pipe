@@ -2301,9 +2301,11 @@ for _ch in ['cr', 'c7', 'cj', 'cL', 'ncr', 'nc7', 'ncj', 'ncL', 'tcr', 'tc7', 't
 for _ch in ['dr', 'd7', 'dj', 'dL', 'ndr', 'nd7', 'ndj', 'ndL', 'tdr', 'td7', 'tdj', 'tdL']:
     TILE_SHAPE[_ch] = 'teardrop'
 for _ch in (list(_DIAG_PARAMS.keys()) + list(_ADAPTER_PARAMS.keys()) +
-           list(_DIAG_CORNER_PARAMS.keys()) + list(_DIAG_ENDCAP_PARAMS.keys()) +
+           list(_DIAG_CORNER_PARAMS.keys()) +
            ['xHa', 'xHd', 'xVa', 'xVd']):
     TILE_SHAPE[_ch] = 'diagonal'
+for _ch in _DIAG_ENDCAP_PARAMS:
+    TILE_SHAPE[_ch] = 'diagonal_endcap'
 
 # Crossover tile → (vertical_tube_char, horizontal_tube_char)
 # Vertical tube is drawn on top, horizontal underneath
@@ -2333,7 +2335,7 @@ def get_tile_weight(ch, tile_weights):
     """Calculate tile weight from size and shape multipliers."""
     if tile_weights is None:
         shape = TILE_SHAPE.get(ch)
-        if shape == 'diagonal':
+        if shape in ('diagonal', 'diagonal_endcap'):
             return 0  # Diagonal tiles off by default
         if ch in CROSSOVER_TUBES:
             return 2
@@ -2769,7 +2771,7 @@ def wave_function_collapse(width, height, tile_weights=None,
             cells_collapsed += 1
             if progress_callback:
                 progress_callback(attempt, max_attempts,
-                                  cells_collapsed, total_cells)
+                                  cells_collapsed, total_cells, backtracks)
 
         if not success:
             continue
