@@ -2743,6 +2743,7 @@ def wave_function_collapse(width, height, tile_weights=None,
                     success = False
                     break
                 backtracks += 1
+                cells_collapsed = len(stack)
                 if backtracks > max_backtracks:
                     success = False
                     break
@@ -2759,6 +2760,7 @@ def wave_function_collapse(width, height, tile_weights=None,
                     success = False
                     break
                 backtracks += 1
+                cells_collapsed = len(stack)
                 if backtracks > max_backtracks:
                     success = False
                     break

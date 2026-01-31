@@ -117,7 +117,7 @@ if 'grid' not in st.session_state or st.session_state.get('grid_dims') != curren
     wfc_progress = st.progress(0, text="Generating pipe layout...")
 
     def wfc_update(attempt, max_attempts, cells, total):
-        pct = cells / total
+        pct = min(cells / total, 1.0)
         wfc_progress.progress(pct, text="Attempt {} — {}/{} cells".format(attempt, cells, total))
 
     grid = pipe_core.wave_function_collapse(grid_width, grid_height,
