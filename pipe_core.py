@@ -1,6 +1,7 @@
 import drawsvg as draw
 import random
 import math
+from collections import deque
 from shapely.geometry import Polygon, LineString
 from shapely.ops import unary_union
 
@@ -320,6 +321,31 @@ _ADAPTER_PARAMS = {
     'taEsw': ('B', 180, 5), 'taSnw': ('B', 270, 5),
 }
 
+# Diagonal corner params: char -> (rotation_deg, half_width)
+# Base shape (0°) is east-pointing V connecting NE+SE ports.
+# 90° CCW rotation maps NE→SE, SE→SW (south-pointing).
+_DIAG_CORNER_PARAMS = {
+    'ndce': (0, 12),   'ndcs': (90, 12),
+    'ndcw': (180, 12), 'ndcn': (270, 12),
+    'tdce': (0, 5),    'tdcs': (90, 5),
+    'tdcw': (180, 5),  'tdcn': (270, 5),
+}
+
+# Diagonal endcap params: char -> (direction, half_width)
+# Half-length diagonal from center to one corner, capped at center end.
+_DIAG_ENDCAP_PARAMS = {
+    'ndne': ('NE', 12), 'ndse': ('SE', 12),
+    'ndsw': ('SW', 12), 'ndnw': ('NW', 12),
+    'tdne': ('NE', 5),  'tdse': ('SE', 5),
+    'tdsw': ('SW', 5),  'tdnw': ('NW', 5),
+}
+
+# Direction vectors for diagonal endcaps: corner offsets and tangent
+_DIAG_DIR_VECS = {
+    'NE': (50, -50), 'SE': (50, 50),
+    'SW': (-50, 50), 'NW': (-50, -50),
+}
+
 
 def get_diagonal_polygon(ch, xloc, yloc):
     """Return parallelogram polygon for a diagonal straight pipe."""
@@ -633,6 +659,265 @@ def draw_adapter_directional_shading(drawing, ch, xloc, yloc, light_dir, sw, par
 
             angle = base_angle + random.uniform(-jitter_angle, jitter_angle)
             hatch_dir = _rotate_vec(tangent2, angle)
+
+            width_mult = 1.0 + random.uniform(-band_width_jitter, band_width_jitter)
+            half_len = (band_width * 0.6) * width_mult
+
+            x1 = base_x - hatch_dir[0] * half_len
+            y1 = base_y - hatch_dir[1] * half_len
+            x2 = base_x + hatch_dir[0] * half_len
+            y2 = base_y + hatch_dir[1] * half_len
+
+            _draw_hatch_line(drawing, x1, y1, x2, y2, hatch_dir, wiggle, sw,
+                            pipe_polygon, occlusion_polygon)
+
+
+# ---------------------------------------------------------------------------
+# Diagonal corner tiles (V-shaped turns between two diagonal directions)
+# ---------------------------------------------------------------------------
+
+def _diag_corner_base_polygon(hw):
+    """Base polygon for east-pointing V corner (NE+SE) in local coords.
+
+    Returns 6 vertices: NE-inner, NE-outer, outer-miter, SE-outer, SE-inner, inner-miter.
+    """
+    off = hw * _INV_SQRT2
+    hw_sqrt2 = hw * _SQRT2
+    return [
+        (50 - off, -50 - off),     # NE inner (NW wall at NE corner)
+        (50 + off, -50 + off),     # NE outer (SE wall at NE corner)
+        (hw_sqrt2, 0),             # Outer miter (east)
+        (50 + off,  50 - off),     # SE outer (NE wall at SE corner)
+        (50 - off,  50 + off),     # SE inner (SW wall at SE corner)
+        (-hw_sqrt2, 0),            # Inner miter (west)
+    ]
+
+
+def get_diagonal_corner_polygon(ch, xloc, yloc):
+    """Return polygon for a diagonal corner (V-shaped turn)."""
+    rot_deg, hw = _DIAG_CORNER_PARAMS[ch]
+    local_pts = _diag_corner_base_polygon(hw)
+
+    cos_r = math.cos(math.radians(rot_deg))
+    sin_r = math.sin(math.radians(rot_deg))
+
+    world_pts = []
+    for px, py in local_pts:
+        rx = px * cos_r - py * sin_r
+        ry = px * sin_r + py * cos_r
+        world_pts.append((xloc + rx, yloc + ry))
+
+    poly = Polygon(world_pts)
+    poly = poly.buffer(0)
+    if not poly.is_valid:
+        return None
+    return poly
+
+
+def draw_diagonal_corner_outline(drawing, ch, xloc, yloc, occlusion_poly, sw):
+    """Draw outline for a diagonal corner tile (all polygon edges)."""
+    rot_deg, hw = _DIAG_CORNER_PARAMS[ch]
+    local_pts = _diag_corner_base_polygon(hw)
+
+    cos_r = math.cos(math.radians(rot_deg))
+    sin_r = math.sin(math.radians(rot_deg))
+
+    def to_world(px, py):
+        rx = px * cos_r - py * sin_r
+        ry = px * sin_r + py * cos_r
+        return (xloc + rx, yloc + ry)
+
+    wp = [to_world(px, py) for px, py in local_pts]
+    n = len(wp)
+    for i in range(n):
+        j = (i + 1) % n
+        clip_and_draw_line(drawing, wp[i][0], wp[i][1], wp[j][0], wp[j][1],
+                           occlusion_poly, sw)
+
+
+def draw_diagonal_corner_directional_shading(drawing, ch, xloc, yloc, light_dir, sw, params,
+                                              pipe_polygon=None, occlusion_polygon=None):
+    """Draw directional hatch marks on a diagonal corner tile.
+
+    Two sections (NE half and SE half in base orientation), each with its own
+    tangent/normal for shading, rotated by the tile's rotation angle.
+    """
+    rot_deg, hw = _DIAG_CORNER_PARAMS[ch]
+
+    cos_r = math.cos(math.radians(rot_deg))
+    sin_r = math.sin(math.radians(rot_deg))
+
+    def rot_dir(dx, dy):
+        return (dx * cos_r - dy * sin_r, dx * sin_r + dy * cos_r)
+
+    # Base tangent/normal for each segment (before rotation)
+    # NE segment: tangent (1,-1)/√2, normals (1,1)/√2 and (-1,-1)/√2
+    # SE segment: tangent (1,1)/√2, normals (-1,1)/√2 and (1,-1)/√2
+    segments = [
+        ((_INV_SQRT2, -_INV_SQRT2), (-_INV_SQRT2, -_INV_SQRT2), (_INV_SQRT2, _INV_SQRT2)),
+        ((_INV_SQRT2, _INV_SQRT2), (_INV_SQRT2, -_INV_SQRT2), (-_INV_SQRT2, _INV_SQRT2)),
+    ]
+
+    scale = hw / 30
+    band_width = params['band_width'] * scale
+    band_offset = params['band_offset'] * scale
+    spacing = params['spacing'] * scale
+    hatch_angle = params['angle']
+    jitter_pos = params['jitter_pos'] * scale
+    jitter_angle = params['jitter_angle']
+    band_width_jitter = params.get('band_width_jitter', 0.0)
+    wiggle = params.get('wiggle', 0.0) * scale
+
+    angles_to_draw = [hatch_angle]
+    if params.get('crosshatch'):
+        angles_to_draw.append(hatch_angle + params.get('crosshatch_angle', 90))
+
+    # Each segment is half the diagonal length (center to corner)
+    seg_length = 50 * _SQRT2
+    band_center_dist = hw - band_offset - band_width / 2
+
+    for base_tangent, base_nl, base_nr in segments:
+        tangent = rot_dir(*base_tangent)
+        normal_left = rot_dir(*base_nl)
+        normal_right = rot_dir(*base_nr)
+
+        dot_left = _dot(normal_left, light_dir)
+        dot_right = _dot(normal_right, light_dir)
+        shadow_normal = normal_left if dot_left < dot_right else normal_right
+
+        num_hatches = max(1, int(seg_length / spacing))
+        for base_angle in angles_to_draw:
+            for i in range(num_hatches + 1):
+                t = i * (seg_length / num_hatches)
+                t += random.uniform(-jitter_pos, jitter_pos)
+
+                base_x = xloc + tangent[0] * t + shadow_normal[0] * band_center_dist
+                base_y = yloc + tangent[1] * t + shadow_normal[1] * band_center_dist
+
+                angle = base_angle + random.uniform(-jitter_angle, jitter_angle)
+                hatch_dir = _rotate_vec(tangent, angle)
+
+                width_mult = 1.0 + random.uniform(-band_width_jitter, band_width_jitter)
+                half_len = (band_width * 0.6) * width_mult
+
+                x1 = base_x - hatch_dir[0] * half_len
+                y1 = base_y - hatch_dir[1] * half_len
+                x2 = base_x + hatch_dir[0] * half_len
+                y2 = base_y + hatch_dir[1] * half_len
+
+                _draw_hatch_line(drawing, x1, y1, x2, y2, hatch_dir, wiggle, sw,
+                                pipe_polygon, occlusion_polygon)
+
+
+# ---------------------------------------------------------------------------
+# Diagonal endcap tiles (half-length diagonal with cap at center end)
+# ---------------------------------------------------------------------------
+
+def get_diagonal_endcap_polygon(ch, xloc, yloc):
+    """Return polygon for a diagonal endcap (half-diagonal with cap)."""
+    direction, hw = _DIAG_ENDCAP_PARAMS[ch]
+    cx, cy = _DIAG_DIR_VECS[direction]
+    # Tangent from center to corner
+    length = math.hypot(cx, cy)
+    tx, ty = cx / length, cy / length
+    # Normal (perpendicular): rotate tangent 90° CW → (ty, -tx)
+    # and CCW → (-ty, tx). We call them "right" and "left".
+    # For direction (tx, ty), perpendicular is (-ty, tx) [left] and (ty, -tx) [right]
+    nlx, nly = -ty, tx    # left normal
+    nrx, nry = ty, -tx    # right normal
+
+    # Wall offsets at ±hw from centerline
+    # At center (0,0):
+    cap_left = (nlx * hw, nly * hw)
+    cap_right = (nrx * hw, nry * hw)
+    # At corner (cx, cy):
+    corner_left = (cx + nlx * hw, cy + nly * hw)
+    corner_right = (cx + nrx * hw, cy + nry * hw)
+
+    pts = [
+        (xloc + cap_left[0], yloc + cap_left[1]),       # Cap left
+        (xloc + cap_right[0], yloc + cap_right[1]),      # Cap right
+        (xloc + corner_right[0], yloc + corner_right[1]),  # Corner right
+        (xloc + corner_left[0], yloc + corner_left[1]),    # Corner left
+    ]
+
+    poly = Polygon(pts)
+    poly = poly.buffer(0)
+    if not poly.is_valid:
+        return None
+    return poly
+
+
+def draw_diagonal_endcap_outline(drawing, ch, xloc, yloc, occlusion_poly, sw):
+    """Draw outline for a diagonal endcap (2 wall lines + 1 cap line)."""
+    direction, hw = _DIAG_ENDCAP_PARAMS[ch]
+    cx, cy = _DIAG_DIR_VECS[direction]
+    length = math.hypot(cx, cy)
+    tx, ty = cx / length, cy / length
+    nlx, nly = -ty, tx
+    nrx, nry = ty, -tx
+
+    cap_l = (xloc + nlx * hw, yloc + nly * hw)
+    cap_r = (xloc + nrx * hw, yloc + nry * hw)
+    corner_l = (xloc + cx + nlx * hw, yloc + cy + nly * hw)
+    corner_r = (xloc + cx + nrx * hw, yloc + cy + nry * hw)
+
+    # Cap line (across center end)
+    clip_and_draw_line(drawing, cap_l[0], cap_l[1], cap_r[0], cap_r[1],
+                       occlusion_poly, sw)
+    # Left wall
+    clip_and_draw_line(drawing, cap_l[0], cap_l[1], corner_l[0], corner_l[1],
+                       occlusion_poly, sw)
+    # Right wall
+    clip_and_draw_line(drawing, cap_r[0], cap_r[1], corner_r[0], corner_r[1],
+                       occlusion_poly, sw)
+
+
+def draw_diagonal_endcap_directional_shading(drawing, ch, xloc, yloc, light_dir, sw, params,
+                                              pipe_polygon=None, occlusion_polygon=None):
+    """Draw directional hatch marks on a diagonal endcap tile."""
+    direction, hw = _DIAG_ENDCAP_PARAMS[ch]
+    cx, cy = _DIAG_DIR_VECS[direction]
+    length = math.hypot(cx, cy)
+    tx, ty = cx / length, cy / length
+    tangent = (tx, ty)
+
+    normal_left = (-ty, tx)
+    normal_right = (ty, -tx)
+
+    scale = hw / 30
+    band_width = params['band_width'] * scale
+    band_offset = params['band_offset'] * scale
+    spacing = params['spacing'] * scale
+    hatch_angle = params['angle']
+    jitter_pos = params['jitter_pos'] * scale
+    jitter_angle = params['jitter_angle']
+    band_width_jitter = params.get('band_width_jitter', 0.0)
+    wiggle = params.get('wiggle', 0.0) * scale
+
+    dot_left = _dot(normal_left, light_dir)
+    dot_right = _dot(normal_right, light_dir)
+    shadow_normal = normal_left if dot_left < dot_right else normal_right
+    band_center_dist = hw - band_offset - band_width / 2
+
+    angles_to_draw = [hatch_angle]
+    if params.get('crosshatch'):
+        angles_to_draw.append(hatch_angle + params.get('crosshatch_angle', 90))
+
+    # Half diagonal length (center to corner)
+    seg_length = 50 * _SQRT2
+    num_hatches = max(1, int(seg_length / spacing))
+
+    for base_angle in angles_to_draw:
+        for i in range(num_hatches + 1):
+            t = i * (seg_length / num_hatches)
+            t += random.uniform(-jitter_pos, jitter_pos)
+
+            base_x = xloc + tangent[0] * t + shadow_normal[0] * band_center_dist
+            base_y = yloc + tangent[1] * t + shadow_normal[1] * band_center_dist
+
+            angle = base_angle + random.uniform(-jitter_angle, jitter_angle)
+            hatch_dir = _rotate_vec(tangent, angle)
 
             width_mult = 1.0 + random.uniform(-band_width_jitter, band_width_jitter)
             half_len = (band_width * 0.6) * width_mult
@@ -1028,6 +1313,12 @@ def get_pipe_polygon(ch, xloc, yloc):
     elif ch in _ADAPTER_PARAMS:
         return get_adapter_polygon(ch, xloc, yloc)
 
+    # Diagonal corners and endcaps
+    elif ch in _DIAG_CORNER_PARAMS:
+        return get_diagonal_corner_polygon(ch, xloc, yloc)
+    elif ch in _DIAG_ENDCAP_PARAMS:
+        return get_diagonal_endcap_polygon(ch, xloc, yloc)
+
     # Crossovers (all sizes)
     elif ch in CROSSOVER_TUBES:
         v_ch, h_ch = CROSSOVER_TUBES[ch]
@@ -1036,6 +1327,14 @@ def get_pipe_polygon(ch, xloc, yloc):
         if v and h:
             return unary_union([v, h])
         return v or h
+
+    # Diagonal crossovers (medium cardinal x narrow diagonal)
+    elif ch in DIAG_CROSSOVER_TUBES:
+        tube_ch, diag_ch = DIAG_CROSSOVER_TUBES[ch]
+        tube_poly = get_tube_polygon(tube_ch, xloc, yloc)
+        diag_poly = get_diagonal_polygon(diag_ch, xloc, yloc)
+        parts = [p for p in [tube_poly, diag_poly] if p is not None]
+        return unary_union(parts) if parts else None
 
     # Cross junctions (medium, narrow, tiny)
     elif ch in ('X', 'nX', 'tX'):
@@ -1091,6 +1390,29 @@ def build_occlusion_polygon(grid, exclude_x, exclude_y, pad=0):
     if not polygons:
         return None
     return unary_union(polygons).buffer(0)  # Clean final geometry
+
+
+def build_occlusion_polygon_cached(poly_cache, exclude_x, exclude_y, pad=0):
+    """Build occlusion polygon using precomputed pipe polygons.
+
+    Same as build_occlusion_polygon but uses a cache of already-constructed
+    and cleaned polygons, avoiding redundant get_pipe_polygon + buffer(0) calls.
+
+    Args:
+        poly_cache: dict of (x, y) -> Shapely Polygon (precomputed, already buffered(0))
+        exclude_x, exclude_y: Position to exclude
+        pad: Stroke width padding
+    """
+    polygons = []
+    for (x, y), poly in poly_cache.items():
+        if x == exclude_x and y == exclude_y:
+            continue
+        if pad > 0:
+            poly = poly.buffer(pad, join_style=2)
+        polygons.append(poly)
+    if not polygons:
+        return None
+    return unary_union(polygons).buffer(0)
 
 
 def clip_line_to_polygon(x1, y1, x2, y2, polygon, exclusion=None):
@@ -1879,12 +2201,57 @@ PORTS = {
     'taNse': {'N': 't', 'SE': 't'},       # N→SE tiny
     'taEsw': {'E': 't', 'SW': 't'},       # E→SW tiny
     'taSnw': {'S': 't', 'NW': 't'},       # S→NW tiny
+
+    # Diagonal corners (V-shaped turns between two diagonal directions)
+    'ndce': {'NE': 'n', 'SE': 'n'},       # East-pointing V (narrow)
+    'ndcs': {'SE': 'n', 'SW': 'n'},       # South-pointing V
+    'ndcw': {'NW': 'n', 'SW': 'n'},       # West-pointing V
+    'ndcn': {'NW': 'n', 'NE': 'n'},       # North-pointing V
+    'tdce': {'NE': 't', 'SE': 't'},       # East-pointing V (tiny)
+    'tdcs': {'SE': 't', 'SW': 't'},       # South-pointing V
+    'tdcw': {'NW': 't', 'SW': 't'},       # West-pointing V
+    'tdcn': {'NW': 't', 'NE': 't'},       # North-pointing V
+
+    # Diagonal endcaps (half-diagonal with cap at center)
+    'ndne': {'NE': 'n'},                   # Narrow endcap NE
+    'ndse': {'SE': 'n'},                   # Narrow endcap SE
+    'ndsw': {'SW': 'n'},                   # Narrow endcap SW
+    'ndnw': {'NW': 'n'},                   # Narrow endcap NW
+    'tdne': {'NE': 't'},                   # Tiny endcap NE
+    'tdse': {'SE': 't'},                   # Tiny endcap SE
+    'tdsw': {'SW': 't'},                   # Tiny endcap SW
+    'tdnw': {'NW': 't'},                   # Tiny endcap NW
+
+    # Diagonal crossovers (medium cardinal x narrow diagonal)
+    'xHa': {'W': 'm', 'E': 'm', 'SW': 'n', 'NE': 'n'},
+    'xHd': {'W': 'm', 'E': 'm', 'NW': 'n', 'SE': 'n'},
+    'xVa': {'N': 'm', 'S': 'm', 'SW': 'n', 'NE': 'n'},
+    'xVd': {'N': 'm', 'S': 'm', 'NW': 'n', 'SE': 'n'},
 }
 
 ALL_CHARS = set(PORTS.keys())
 
 # Backward compatibility: OPENINGS as set of directions (for code that only needs presence)
 OPENINGS = {ch: set(ports.keys()) for ch, ports in PORTS.items()}
+
+# Precomputed compatibility table: COMPAT_TABLE[ch][direction] = frozenset of compatible tiles
+# Built once at module load; replaces O(106)-per-call iteration in get_compatible_neighbors
+COMPAT_TABLE = {}
+for _ch in ALL_CHARS:
+    COMPAT_TABLE[_ch] = {}
+    for _dir in DIRECTION_OFFSETS:
+        _opp = OPPOSITE[_dir]
+        _port = PORTS.get(_ch, {}).get(_dir)
+        COMPAT_TABLE[_ch][_dir] = frozenset(
+            c for c in ALL_CHARS if PORTS.get(c, {}).get(_opp) == _port
+        )
+
+# Precomputed edge-constraint sets: tiles with NO opening in each direction
+_NO_OPENING = {}
+for _dir in DIRECTION_OFFSETS:
+    _NO_OPENING[_dir] = frozenset(
+        ch for ch in ALL_CHARS if _dir not in PORTS.get(ch, {})
+    )
 
 # Tile category mappings for weight system
 TILE_SIZE = {}
@@ -1893,11 +2260,13 @@ for _ch in ['|', '-', 'r', '7', 'j', 'L', '+', 'X', 'T', 'B', 'E', 'W',
     TILE_SIZE[_ch] = 'medium'
 for _ch in ['i', '=', 'nr', 'n7', 'nj', 'nL', 'nX', 'nT', 'nB', 'nE', 'nW',
             'nz>', 'nz<', 'nz^', 'nzv', 'ncr', 'nc7', 'ncj', 'ncL', 'ndr', 'nd7', 'ndj', 'ndL',
-            'nDa', 'nDd', 'naSne', 'naWse', 'naNsw', 'naEnw', 'naWne', 'naNse', 'naEsw', 'naSnw']:
+            'nDa', 'nDd', 'naSne', 'naWse', 'naNsw', 'naEnw', 'naWne', 'naNse', 'naEsw', 'naSnw',
+            'ndce', 'ndcs', 'ndcw', 'ndcn', 'ndne', 'ndse', 'ndsw', 'ndnw']:
     TILE_SIZE[_ch] = 'narrow'
 for _ch in ['!', '.', 'tr', 't7', 'tj', 'tL', 'tX', 'tT', 'tB', 'tE', 'tW',
             'tz>', 'tz<', 'tz^', 'tzv', 'tcr', 'tc7', 'tcj', 'tcL', 'tdr', 'td7', 'tdj', 'tdL',
-            'tDa', 'tDd', 'taSne', 'taWse', 'taNsw', 'taEnw', 'taWne', 'taNse', 'taEsw', 'taSnw']:
+            'tDa', 'tDd', 'taSne', 'taWse', 'taNsw', 'taEnw', 'taWne', 'taNse', 'taEsw', 'taSnw',
+            'tdce', 'tdcs', 'tdcw', 'tdcn', 'tdne', 'tdse', 'tdsw', 'tdnw']:
     TILE_SIZE[_ch] = 'tiny'
 for _ch in ['Rv', 'RV', 'Rh', 'RH']:
     TILE_SIZE[_ch] = 'reducer_mn'
@@ -1912,6 +2281,8 @@ for _ch in ['+mt', '+tm']:
     TILE_SIZE[_ch] = 'crossover_mt'
 for _ch in ['+nt', '+tn']:
     TILE_SIZE[_ch] = 'reducer_nt'
+for _ch in ['xHa', 'xHd', 'xVa', 'xVd']:
+    TILE_SIZE[_ch] = 'reducer_mn'
 
 TILE_SHAPE = {}
 for _ch in ['|', '-', 'i', '=', '!', '.']:
@@ -1929,7 +2300,9 @@ for _ch in ['cr', 'c7', 'cj', 'cL', 'ncr', 'nc7', 'ncj', 'ncL', 'tcr', 'tc7', 't
     TILE_SHAPE[_ch] = 'chamfer'
 for _ch in ['dr', 'd7', 'dj', 'dL', 'ndr', 'nd7', 'ndj', 'ndL', 'tdr', 'td7', 'tdj', 'tdL']:
     TILE_SHAPE[_ch] = 'teardrop'
-for _ch in list(_DIAG_PARAMS.keys()) + list(_ADAPTER_PARAMS.keys()):
+for _ch in (list(_DIAG_PARAMS.keys()) + list(_ADAPTER_PARAMS.keys()) +
+           list(_DIAG_CORNER_PARAMS.keys()) + list(_DIAG_ENDCAP_PARAMS.keys()) +
+           ['xHa', 'xHd', 'xVa', 'xVd']):
     TILE_SHAPE[_ch] = 'diagonal'
 
 # Crossover tile → (vertical_tube_char, horizontal_tube_char)
@@ -1944,6 +2317,15 @@ CROSSOVER_TUBES = {
     '+tm': ('!', '-'),
     '+nt': ('i', '.'),
     '+tn': ('!', '='),
+}
+
+# Diagonal crossover tiles: medium cardinal x narrow diagonal
+# Maps tile char -> (cardinal_tube_char, diagonal_char). Diagonal is on top.
+DIAG_CROSSOVER_TUBES = {
+    'xHa': ('-', 'nDa'),   # horizontal medium + ascending narrow diagonal
+    'xHd': ('-', 'nDd'),   # horizontal medium + descending narrow diagonal
+    'xVa': ('|', 'nDa'),   # vertical medium + ascending narrow diagonal
+    'xVd': ('|', 'nDd'),   # vertical medium + descending narrow diagonal
 }
 
 
@@ -1990,22 +2372,8 @@ def has_opening(ch, direction):
 
 def get_compatible_neighbors(ch, direction):
     """Get all tiles that can connect to ch in the given direction.
-
-    Tiles connect if:
-    - Both have openings in their respective directions (ch.direction, neighbor.opposite)
-    - The port sizes match
-    OR
-    - Neither has an opening (both closed)
-    """
-    opp_dir = OPPOSITE[direction]
-    ch_port_size = get_port_size(ch, direction)
-    compatible = set()
-    for candidate in ALL_CHARS:
-        cand_port_size = get_port_size(candidate, opp_dir)
-        # Both closed (None == None) or both open with same size
-        if ch_port_size == cand_port_size:
-            compatible.add(candidate)
-    return compatible
+    Uses precomputed COMPAT_TABLE for O(1) lookup."""
+    return COMPAT_TABLE[ch][direction]
 
 
 def find_n(ch):
@@ -2115,51 +2483,135 @@ def create_possibility_grid(width, height):
 
 
 def get_constrained_possibilities(possibilities, x, y, width, height):
-    valid = possibilities.copy()
+    valid = possibilities
     if x == 0:
-        valid = {ch for ch in valid if not has_opening(ch, 'W')}
+        valid = valid & _NO_OPENING['W']
     if x == width - 1:
-        valid = {ch for ch in valid if not has_opening(ch, 'E')}
+        valid = valid & _NO_OPENING['E']
     if y == 0:
-        valid = {ch for ch in valid if not has_opening(ch, 'N')}
+        valid = valid & _NO_OPENING['N']
     if y == height - 1:
-        valid = {ch for ch in valid if not has_opening(ch, 'S')}
+        valid = valid & _NO_OPENING['S']
     # Diagonal edges — block port if neighbor cell would be out of bounds
     if x == width - 1 or y == 0:
-        valid = {ch for ch in valid if not has_opening(ch, 'NE')}
+        valid = valid & _NO_OPENING['NE']
     if x == 0 or y == 0:
-        valid = {ch for ch in valid if not has_opening(ch, 'NW')}
+        valid = valid & _NO_OPENING['NW']
     if x == width - 1 or y == height - 1:
-        valid = {ch for ch in valid if not has_opening(ch, 'SE')}
+        valid = valid & _NO_OPENING['SE']
     if x == 0 or y == height - 1:
-        valid = {ch for ch in valid if not has_opening(ch, 'SW')}
+        valid = valid & _NO_OPENING['SW']
     return valid
 
 
-def propagate_constraints(poss_grid, width, height):
-    changed = True
-    while changed:
-        changed = False
+def propagate_constraints(poss_grid, width, height, dirty_cells=None):
+    """Propagate constraints using AC-3-style dirty-cell queue.
+
+    Returns False if a contradiction is found (any cell has 0 possibilities).
+    If dirty_cells is provided, only those cells are initially queued.
+    Otherwise all cells are queued (used for initial propagation).
+    """
+    queue = deque()
+    in_queue = set()
+
+    if dirty_cells is None:
         for x in range(width):
             for y in range(height):
-                if len(poss_grid[x][y]) <= 1:
-                    continue
-                current = poss_grid[x][y].copy()
-                current = get_constrained_possibilities(current, x, y, width, height)
-                # Check all 8 directions for neighbor compatibility
+                queue.append((x, y))
+                in_queue.add((x, y))
+    else:
+        # Seed both the changed cells AND their neighbors, since a change to
+        # cell (x,y) means neighbors may need their possibilities reduced.
+        # Without this, a collapsed cell re-checks itself (no change) and
+        # neighbors never get queued.
+        seed = set()
+        for (cx, cy) in dirty_cells:
+            seed.add((cx, cy))
+            for _, (dx, dy) in DIRECTION_OFFSETS.items():
+                nx, ny = cx + dx, cy + dy
+                if 0 <= nx < width and 0 <= ny < height:
+                    seed.add((nx, ny))
+        for cell in seed:
+            queue.append(cell)
+            in_queue.add(cell)
+
+    while True:
+        # Phase A: AC-3 constraint propagation
+        phase_a_changed = set()
+        while queue:
+            x, y = queue.popleft()
+            in_queue.discard((x, y))
+            old = poss_grid[x][y]
+            current = get_constrained_possibilities(old, x, y, width, height)
+            for direction, (dx, dy) in DIRECTION_OFFSETS.items():
+                nx, ny = x + dx, y + dy
+                if 0 <= nx < width and 0 <= ny < height:
+                    opp = OPPOSITE[direction]
+                    nposs = poss_grid[nx][ny]
+                    if len(nposs) == 1:
+                        valid = COMPAT_TABLE[next(iter(nposs))][opp]
+                    else:
+                        valid = frozenset().union(
+                            *(COMPAT_TABLE[n][opp] for n in nposs)
+                        )
+                    current &= valid
+            if len(current) == 0:
+                poss_grid[x][y] = current
+                return False  # contradiction
+            if current != old:
+                poss_grid[x][y] = current
+                phase_a_changed.add((x, y))
                 for direction, (dx, dy) in DIRECTION_OFFSETS.items():
                     nx, ny = x + dx, y + dy
                     if 0 <= nx < width and 0 <= ny < height:
-                        opp = OPPOSITE[direction]
-                        valid_from_neighbor = set()
-                        for n_ch in poss_grid[nx][ny]:
-                            valid_from_neighbor |= get_compatible_neighbors(n_ch, opp)
-                        current &= valid_from_neighbor
-                if current != poss_grid[x][y]:
-                    poss_grid[x][y] = current
-                    changed = True
-        if remove_tight_circle_possibilities(poss_grid, width, height):
-            changed = True
+                        if (nx, ny) not in in_queue:
+                            queue.append((nx, ny))
+                            in_queue.add((nx, ny))
+
+        # Phase B: tight-circle removal (scoped to neighborhood of changes)
+        # Skip for large grids (>200 cells) where it over-constrains the search
+        # and makes solutions impossible. Tight circles are purely aesthetic.
+        if width * height <= 200:
+            check_cells = set()
+            for (cx, cy) in phase_a_changed:
+                for dx in range(-1, 2):
+                    for dy in range(-1, 2):
+                        nx, ny = cx + dx, cy + dy
+                        if 0 <= nx < width and 0 <= ny < height:
+                            check_cells.add((nx, ny))
+
+            tight_changed = set()
+            tc_any = True
+            while tc_any:
+                tc_any = False
+                for (x, y) in list(check_cells):
+                    if len(poss_grid[x][y]) <= 1:
+                        continue
+                    to_remove = set()
+                    for ch in poss_grid[x][y]:
+                        if would_complete_tight_circle(poss_grid, x, y, ch, width, height):
+                            to_remove.add(ch)
+                    if to_remove and len(poss_grid[x][y] - to_remove) > 0:
+                        poss_grid[x][y] -= to_remove
+                        tight_changed.add((x, y))
+                        for dx in range(-1, 2):
+                            for dy in range(-1, 2):
+                                nx, ny = x + dx, y + dy
+                                if 0 <= nx < width and 0 <= ny < height:
+                                    check_cells.add((nx, ny))
+                        tc_any = True
+
+            # If tight-circle pass changed cells, re-queue and loop back
+            if tight_changed:
+                for cell in tight_changed:
+                    if cell not in in_queue:
+                        queue.append(cell)
+                        in_queue.add(cell)
+                continue
+
+        break  # converged
+
+    return True  # no contradiction
 
 
 def find_min_entropy_cell(poss_grid, width, height):
@@ -2178,64 +2630,146 @@ def find_min_entropy_cell(poss_grid, width, height):
     return None
 
 
-def collapse_cell(poss_grid, x, y, tile_weights=None):
+def collapse_cell(poss_grid, x, y, tile_weights=None, width=None, height=None):
     possibilities = list(poss_grid[x][y])
-    if possibilities:
-        weights = [get_tile_weight(ch, tile_weights) for ch in possibilities]
-        # Filter out zero-weight tiles to prevent WFC stalls
-        filtered = [(ch, w) for ch, w in zip(possibilities, weights) if w > 0]
-        if not filtered:
-            # All remaining tiles have zero weight — treat as contradiction
-            return False
+    if not possibilities:
+        return False
+    weights = [get_tile_weight(ch, tile_weights) for ch in possibilities]
+    filtered = [(ch, w) for ch, w in zip(possibilities, weights) if w > 0]
+    if not filtered:
+        return False
+
+    # Least-constraining value: bias toward tiles that leave more options
+    # for the most-constrained uncollapsed neighbor. Cheaper than checking
+    # all 8 neighbors while still avoiding contradiction-prone choices.
+    if width is not None and height is not None:
+        # Find the most constrained uncollapsed neighbor
+        mc_dir = None
+        mc_count = float('inf')
+        mc_poss = None
+        for direction, (dx, dy) in DIRECTION_OFFSETS.items():
+            nx, ny = x + dx, y + dy
+            if 0 <= nx < width and 0 <= ny < height:
+                nposs = poss_grid[nx][ny]
+                nc = len(nposs)
+                if 1 < nc < mc_count:
+                    mc_count = nc
+                    mc_dir = direction
+                    mc_poss = nposs
+
+        if mc_dir is not None:
+            scored = []
+            for ch, w in filtered:
+                compat = len(COMPAT_TABLE[ch][mc_dir] & mc_poss)
+                scored.append((ch, w * (1 + compat)))
+            possibilities, weights = zip(*scored)
+        else:
+            possibilities, weights = zip(*filtered)
+    else:
         possibilities, weights = zip(*filtered)
-        chosen = random.choices(list(possibilities), weights=list(weights), k=1)[0]
-        poss_grid[x][y] = {chosen}
-        return True
+
+    chosen = random.choices(list(possibilities), weights=list(weights), k=1)[0]
+    poss_grid[x][y] = {chosen}
+    return True
+
+
+def _wfc_backtrack(stack, poss_grid, width, height, tile_weights):
+    """Pop stack frames until we find a cell with viable alternatives."""
+    while stack:
+        snapshot, bx, by, excluded = stack.pop()
+        # Restore full grid state (undoes AC-3 + tight-circle changes)
+        for i in range(len(snapshot)):
+            for j in range(len(snapshot[i])):
+                poss_grid[i][j] = snapshot[i][j]
+
+        # Remove excluded tiles
+        poss_grid[bx][by] -= excluded
+
+        if len(poss_grid[bx][by]) == 0:
+            continue  # empty cell — backtrack further
+
+        # Check for viable options (non-zero weight)
+        if not any(get_tile_weight(ch, tile_weights) > 0
+                   for ch in poss_grid[bx][by]):
+            continue  # all remaining options zero-weight — backtrack further
+
+        # Re-propagate with reduced options
+        if propagate_constraints(poss_grid, width, height,
+                                  dirty_cells={(bx, by)}):
+            return True  # recovered
+
+        # Propagation found contradiction — backtrack further
+
     return False
 
 
 def wave_function_collapse(width, height, tile_weights=None,
-                           max_iterations=10000, max_attempts=20):
-    """Run WFC and return a 2D grid of pipe characters, or None on failure."""
+                           max_attempts=200, progress_callback=None):
+    """Run WFC with backtracking. Returns a 2D grid of pipe chars, or None."""
+    max_backtracks = width * height  # fail fast on bad seeds
+    total_cells = width * height
     for attempt in range(1, max_attempts + 1):
         poss_grid = create_possibility_grid(width, height)
 
         for x in range(width):
             for y in range(height):
                 poss_grid[x][y] = get_constrained_possibilities(
-                    poss_grid[x][y], x, y, width, height
-                )
+                    poss_grid[x][y], x, y, width, height)
 
-        propagate_constraints(poss_grid, width, height)
+        if not propagate_constraints(poss_grid, width, height):
+            continue
 
-        contradiction = False
-        iterations = 0
-        while iterations < max_iterations:
-            iterations += 1
+        stack = []  # [(snapshot, x, y, excluded_set), ...]
+        backtracks = 0
+        cells_collapsed = 0
+        success = True
+
+        while True:
             cell = find_min_entropy_cell(poss_grid, width, height)
             if cell is None:
-                break
+                break  # all collapsed — done
 
             x, y = cell
-            if not collapse_cell(poss_grid, x, y, tile_weights):
-                contradiction = True
-                break
 
-            propagate_constraints(poss_grid, width, height)
+            # Save state BEFORE collapse
+            snapshot = [[c.copy() for c in row] for row in poss_grid]
 
-            # Check for contradictions
-            for cx in range(width):
-                for cy in range(height):
-                    if len(poss_grid[cx][cy]) == 0:
-                        contradiction = True
-                        break
-                if contradiction:
+            if not collapse_cell(poss_grid, x, y, tile_weights,
+                                 width=width, height=height):
+                # No viable options in this cell — backtrack
+                recovered = _wfc_backtrack(
+                    stack, poss_grid, width, height, tile_weights)
+                if not recovered:
+                    success = False
                     break
+                backtracks += 1
+                if backtracks > max_backtracks:
+                    success = False
+                    break
+                continue
 
-            if contradiction:
-                break
+            chosen = next(iter(poss_grid[x][y]))
+            stack.append((snapshot, x, y, {chosen}))
 
-        if contradiction:
+            if not propagate_constraints(poss_grid, width, height,
+                                          dirty_cells={(x, y)}):
+                recovered = _wfc_backtrack(
+                    stack, poss_grid, width, height, tile_weights)
+                if not recovered:
+                    success = False
+                    break
+                backtracks += 1
+                if backtracks > max_backtracks:
+                    success = False
+                    break
+                continue
+
+            cells_collapsed += 1
+            if progress_callback:
+                progress_callback(attempt, max_attempts,
+                                  cells_collapsed, total_cells)
+
+        if not success:
             continue
 
         # Convert to final grid
@@ -2243,9 +2777,10 @@ def wave_function_collapse(width, height, tile_weights=None,
         for x in range(width):
             for y in range(height):
                 if len(poss_grid[x][y]) == 1:
-                    final_grid[x][y] = list(poss_grid[x][y])[0]
+                    final_grid[x][y] = next(iter(poss_grid[x][y]))
                 else:
-                    final_grid[x][y] = random.choice(list(poss_grid[x][y])) if poss_grid[x][y] else '+'
+                    final_grid[x][y] = (random.choice(list(poss_grid[x][y]))
+                                        if poss_grid[x][y] else '+')
         return final_grid
 
     return None
@@ -3267,6 +3802,19 @@ def render_svg(grid, stroke_width, shading_style, shading_stroke_width,
     # Calculate padding for stroke width (prevents visual overlap at boundaries)
     pad = max(stroke_width, shading_stroke_width) * 0.5 + 0.1
 
+    # Precompute all pipe polygons once (avoids redundant construction per tile)
+    _poly_cache = {}
+    for x in range(width):
+        for y in range(height):
+            ch = grid[x][y]
+            xloc = (x - (width - 1) / 2.0) * 100
+            yloc = (y - (height - 1) / 2.0) * 100
+            poly = get_pipe_polygon(ch, xloc, yloc)
+            if poly is not None:
+                poly = poly.buffer(0)
+                if poly.is_valid and not poly.is_empty:
+                    _poly_cache[(x, y)] = poly
+
     # Draw each pipe with proper clipping against all other pipes
     total_tiles = width * height
     tile_count = 0
@@ -3277,8 +3825,10 @@ def render_svg(grid, stroke_width, shading_style, shading_stroke_width,
             xloc = (x - (width - 1) / 2.0) * 100
             yloc = (y - (height - 1) / 2.0) * 100
 
-            # Build occlusion polygon (all other pipes, buffered for stroke width)
-            occlusion_poly = build_occlusion_polygon(grid, x, y, pad=pad)
+            # Build occlusion polygon using cached polygons
+            occlusion_poly = build_occlusion_polygon_cached(
+                _poly_cache, x, y, pad=pad
+            )
 
             # Draw pipe outlines with clipping
             if ch in ('|', '-', 'i', '=', '!', '.'):
@@ -3299,6 +3849,10 @@ def render_svg(grid, stroke_width, shading_style, shading_stroke_width,
                 draw_diagonal_outline(d, ch, xloc, yloc, occlusion_poly, stroke_width)
             elif ch in _ADAPTER_PARAMS:
                 draw_adapter_outline(d, ch, xloc, yloc, occlusion_poly, stroke_width)
+            elif ch in _DIAG_CORNER_PARAMS:
+                draw_diagonal_corner_outline(d, ch, xloc, yloc, occlusion_poly, stroke_width)
+            elif ch in _DIAG_ENDCAP_PARAMS:
+                draw_diagonal_endcap_outline(d, ch, xloc, yloc, occlusion_poly, stroke_width)
             elif ch in ('Rv', 'RV', 'Tv', 'TV', 'Rh', 'RH', 'Th', 'TH'):
                 draw_reducer_outline(d, ch, xloc, yloc, occlusion_poly, stroke_width)
             elif ch in ('X', 'nX', 'tX'):
@@ -3332,6 +3886,24 @@ def render_svg(grid, stroke_width, shading_style, shading_stroke_width,
 
                 # Draw vertical on top (only clipped against other pipes, not horizontal)
                 draw_tube_outline(d, v_ch, xloc, yloc, occlusion_poly, stroke_width)
+
+            elif ch in DIAG_CROSSOVER_TUBES:
+                # Diagonal crossover: diagonal on top, cardinal tube underneath
+                tube_ch, diag_ch = DIAG_CROSSOVER_TUBES[ch]
+                diag_poly = get_diagonal_polygon(diag_ch, xloc, yloc)
+                if diag_poly:
+                    diag_poly = diag_poly.buffer(pad, join_style=2)
+
+                # Draw tube underneath — clipped by diagonal + neighbors
+                tube_occlusion = occlusion_poly
+                if tube_occlusion is not None and diag_poly is not None:
+                    tube_occlusion = tube_occlusion.union(diag_poly)
+                elif diag_poly is not None:
+                    tube_occlusion = diag_poly
+                draw_tube_outline(d, tube_ch, xloc, yloc, tube_occlusion, stroke_width)
+
+                # Draw diagonal on top — only clipped by neighbors
+                draw_diagonal_outline(d, diag_ch, xloc, yloc, occlusion_poly, stroke_width)
 
             # Draw shading with clipping
             if shading_style == 'directional-hatch':
@@ -3370,6 +3942,12 @@ def render_svg(grid, stroke_width, shading_style, shading_stroke_width,
                 elif ch in _ADAPTER_PARAMS:
                     draw_adapter_directional_shading(d, ch, xloc, yloc, light_dir, shading_stroke_width, params,
                                                      pipe_polygon=pipe_poly, occlusion_polygon=occlusion_poly)
+                elif ch in _DIAG_CORNER_PARAMS:
+                    draw_diagonal_corner_directional_shading(d, ch, xloc, yloc, light_dir, shading_stroke_width, params,
+                                                              pipe_polygon=pipe_poly, occlusion_polygon=occlusion_poly)
+                elif ch in _DIAG_ENDCAP_PARAMS:
+                    draw_diagonal_endcap_directional_shading(d, ch, xloc, yloc, light_dir, shading_stroke_width, params,
+                                                              pipe_polygon=pipe_poly, occlusion_polygon=occlusion_poly)
                 elif ch in ('Rv', 'RV', 'Tv', 'TV', 'Rh', 'RH', 'Th', 'TH'):
                     draw_reducer_directional_shading(d, ch, xloc, yloc, light_dir, shading_stroke_width, params,
                                                      pipe_polygon=pipe_poly, occlusion_polygon=occlusion_poly)
@@ -3412,6 +3990,32 @@ def render_svg(grid, stroke_width, shading_style, shading_stroke_width,
                     draw_tube_directional_shading(d, v_ch, xloc, yloc, light_dir, shading_stroke_width, params,
                                                   pipe_polygon=v_poly, occlusion_polygon=occlusion_poly)
 
+                elif ch in DIAG_CROSSOVER_TUBES:
+                    tube_ch, diag_ch = DIAG_CROSSOVER_TUBES[ch]
+                    tube_poly = get_tube_polygon(tube_ch, xloc, yloc)
+                    diag_poly = get_diagonal_polygon(diag_ch, xloc, yloc)
+                    if tube_poly:
+                        tube_poly = tube_poly.buffer(0)
+                    if diag_poly:
+                        diag_poly = diag_poly.buffer(0)
+
+                    # Tube shading: clipped by diagonal (on top) + neighbors
+                    tube_occlusion = occlusion_poly
+                    if tube_occlusion is not None and diag_poly is not None:
+                        diag_buffered = diag_poly.buffer(pad, join_style=2)
+                        tube_occlusion = tube_occlusion.union(diag_buffered)
+                    elif diag_poly is not None:
+                        tube_occlusion = diag_poly.buffer(pad, join_style=2)
+
+                    draw_tube_directional_shading(d, tube_ch, xloc, yloc, light_dir,
+                                                   shading_stroke_width, params,
+                                                   pipe_polygon=tube_poly,
+                                                   occlusion_polygon=tube_occlusion)
+                    draw_diagonal_directional_shading(d, diag_ch, xloc, yloc, light_dir,
+                                                       shading_stroke_width, params,
+                                                       pipe_polygon=diag_poly,
+                                                       occlusion_polygon=occlusion_poly)
+
             elif shading_style in ('accent', 'hatch', 'double-wall'):
                 # Draw other shading styles with clipping
                 if ch in ('|', '-'):
@@ -3432,6 +4036,21 @@ def render_svg(grid, stroke_width, shading_style, shading_stroke_width,
 
                     draw_tube_shading_clipped(d, h_ch, xloc, yloc, shading_style, shading_stroke_width, h_occlusion)
                     draw_tube_shading_clipped(d, v_ch, xloc, yloc, shading_style, shading_stroke_width, occlusion_poly)
+
+                elif ch in DIAG_CROSSOVER_TUBES:
+                    tube_ch, diag_ch = DIAG_CROSSOVER_TUBES[ch]
+                    diag_poly = get_diagonal_polygon(diag_ch, xloc, yloc)
+                    if diag_poly:
+                        diag_poly = diag_poly.buffer(pad, join_style=2)
+
+                    tube_occlusion = occlusion_poly
+                    if tube_occlusion is not None and diag_poly is not None:
+                        tube_occlusion = tube_occlusion.union(diag_poly)
+                    elif diag_poly is not None:
+                        tube_occlusion = diag_poly
+
+                    draw_tube_shading_clipped(d, tube_ch, xloc, yloc, shading_style,
+                                               shading_stroke_width, tube_occlusion)
 
             tile_count += 1
             if progress_callback:

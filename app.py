@@ -114,11 +114,18 @@ with st.sidebar:
 current_dims = (grid_width, grid_height)
 
 if 'grid' not in st.session_state or st.session_state.get('grid_dims') != current_dims:
-    with st.spinner("Generating pipe layout..."):
-        grid = pipe_core.wave_function_collapse(grid_width, grid_height,
-                                                 tile_weights=tile_weights)
-        st.session_state.grid = grid
-        st.session_state.grid_dims = current_dims
+    wfc_progress = st.progress(0, text="Generating pipe layout...")
+
+    def wfc_update(attempt, max_attempts, cells, total):
+        pct = cells / total
+        wfc_progress.progress(pct, text="Attempt {} — {}/{} cells".format(attempt, cells, total))
+
+    grid = pipe_core.wave_function_collapse(grid_width, grid_height,
+                                             tile_weights=tile_weights,
+                                             progress_callback=wfc_update)
+    wfc_progress.empty()
+    st.session_state.grid = grid
+    st.session_state.grid_dims = current_dims
 
 grid = st.session_state.grid
 
