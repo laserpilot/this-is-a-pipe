@@ -92,6 +92,10 @@ with st.sidebar:
                                    help="Dead-end caps for diagonal pipes. 0 = diagonals must connect.")
         w_junction = st.slider("Junctions", 0.1, 5.0, 2.0, 0.1)
         w_reducer = st.slider("Reducers", 0.1, 5.0, 1.0, 0.1)
+        w_endcap = st.slider("Cardinal Endcaps", 0.0, 5.0, 0.0, 0.1,
+                              help="Dead-end caps for cardinal pipes. Set > 0 to enable.")
+        w_mixed_corner = st.slider("Mixed-Size Corners", 0.0, 5.0, 0.0, 0.1,
+                                    help="Corners connecting medium and narrow pipes. Set > 0 to enable.")
 
     tile_weights = {
         'size': {'medium': w_medium, 'narrow': w_narrow, 'tiny': w_tiny},
@@ -99,7 +103,8 @@ with st.sidebar:
                   'chamfer': w_chamfer, 'teardrop': w_teardrop,
                   'dodge': w_dodge, 'diagonal': w_diagonal,
                   'diagonal_endcap': w_diag_endcap,
-                  'junction': w_junction, 'reducer': w_reducer},
+                  'junction': w_junction, 'reducer': w_reducer,
+                  'endcap': w_endcap, 'mixed_corner': w_mixed_corner},
     }
 
     st.header("Grid Settings")

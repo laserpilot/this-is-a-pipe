@@ -931,6 +931,237 @@ def draw_diagonal_endcap_directional_shading(drawing, ch, xloc, yloc, light_dir,
                             pipe_polygon, occlusion_polygon)
 
 
+# Cardinal endcap params: char -> (direction, half_width)
+# Half-cell dead-end tile, open on one cardinal side, capped at center.
+_ENDCAP_PARAMS = {
+    'eN': ('N', 30),  'eS': ('S', 30),  'eE': ('E', 30),  'eW': ('W', 30),
+    'neN': ('N', 12), 'neS': ('S', 12), 'neE': ('E', 12), 'neW': ('W', 12),
+    'teN': ('N', 5),  'teS': ('S', 5),  'teE': ('E', 5),  'teW': ('W', 5),
+}
+
+
+def get_endcap_polygon(ch, xloc, yloc):
+    """Return Shapely Polygon for a cardinal endcap (half-cell rectangle)."""
+    direction, hw = _ENDCAP_PARAMS[ch]
+    if direction == 'N':
+        pts = [(xloc - hw, yloc - 50), (xloc + hw, yloc - 50),
+               (xloc + hw, yloc),      (xloc - hw, yloc)]
+    elif direction == 'S':
+        pts = [(xloc - hw, yloc),      (xloc + hw, yloc),
+               (xloc + hw, yloc + 50), (xloc - hw, yloc + 50)]
+    elif direction == 'E':
+        pts = [(xloc, yloc - hw),      (xloc + 50, yloc - hw),
+               (xloc + 50, yloc + hw), (xloc, yloc + hw)]
+    elif direction == 'W':
+        pts = [(xloc - 50, yloc - hw), (xloc, yloc - hw),
+               (xloc, yloc + hw),      (xloc - 50, yloc + hw)]
+    else:
+        return None
+    return Polygon(pts)
+
+
+def draw_endcap_outline(drawing, ch, xloc, yloc, occlusion_poly, sw):
+    """Draw outline for a cardinal endcap: cap line + 2 wall lines."""
+    direction, hw = _ENDCAP_PARAMS[ch]
+    if direction == 'N':
+        clip_and_draw_line(drawing, xloc - hw, yloc, xloc + hw, yloc, occlusion_poly, sw)
+        clip_and_draw_line(drawing, xloc - hw, yloc, xloc - hw, yloc - 50, occlusion_poly, sw)
+        clip_and_draw_line(drawing, xloc + hw, yloc, xloc + hw, yloc - 50, occlusion_poly, sw)
+    elif direction == 'S':
+        clip_and_draw_line(drawing, xloc - hw, yloc, xloc + hw, yloc, occlusion_poly, sw)
+        clip_and_draw_line(drawing, xloc - hw, yloc, xloc - hw, yloc + 50, occlusion_poly, sw)
+        clip_and_draw_line(drawing, xloc + hw, yloc, xloc + hw, yloc + 50, occlusion_poly, sw)
+    elif direction == 'E':
+        clip_and_draw_line(drawing, xloc, yloc - hw, xloc, yloc + hw, occlusion_poly, sw)
+        clip_and_draw_line(drawing, xloc, yloc - hw, xloc + 50, yloc - hw, occlusion_poly, sw)
+        clip_and_draw_line(drawing, xloc, yloc + hw, xloc + 50, yloc + hw, occlusion_poly, sw)
+    elif direction == 'W':
+        clip_and_draw_line(drawing, xloc, yloc - hw, xloc, yloc + hw, occlusion_poly, sw)
+        clip_and_draw_line(drawing, xloc, yloc - hw, xloc - 50, yloc - hw, occlusion_poly, sw)
+        clip_and_draw_line(drawing, xloc, yloc + hw, xloc - 50, yloc + hw, occlusion_poly, sw)
+
+
+def draw_endcap_directional_shading(drawing, ch, xloc, yloc, light_dir, sw, params,
+                                     pipe_polygon=None, occlusion_polygon=None):
+    """Draw directional hatch marks on a cardinal endcap (half-tube shading)."""
+    direction, hw = _ENDCAP_PARAMS[ch]
+
+    # Tangent points from center toward the open edge
+    if direction == 'N':
+        tangent = (0, -1)
+        normal_left, normal_right = (-1, 0), (1, 0)
+    elif direction == 'S':
+        tangent = (0, 1)
+        normal_left, normal_right = (-1, 0), (1, 0)
+    elif direction == 'E':
+        tangent = (1, 0)
+        normal_left, normal_right = (0, -1), (0, 1)
+    else:  # W
+        tangent = (-1, 0)
+        normal_left, normal_right = (0, -1), (0, 1)
+
+    scale = hw / 30
+    band_width = params['band_width'] * scale
+    band_offset = params['band_offset'] * scale
+    spacing = params['spacing'] * scale
+    hatch_angle = params['angle']
+    jitter_pos = params['jitter_pos'] * scale
+    jitter_angle = params['jitter_angle']
+    band_width_jitter = params.get('band_width_jitter', 0.0)
+    wiggle = params.get('wiggle', 0.0) * scale
+
+    dot_left = _dot(normal_left, light_dir)
+    dot_right = _dot(normal_right, light_dir)
+    shadow_normal = normal_left if dot_left < dot_right else normal_right
+    band_center_dist = hw - band_offset - band_width / 2
+
+    angles_to_draw = [hatch_angle]
+    if params.get('crosshatch'):
+        angles_to_draw.append(hatch_angle + params.get('crosshatch_angle', 90))
+
+    # Half-cell: 50 units from center to edge, hatches along 0..50 range
+    num_hatches = max(1, int(50 / spacing))
+    for base_angle in angles_to_draw:
+        for i in range(num_hatches + 1):
+            t = i * (50.0 / num_hatches)
+            t += random.uniform(-jitter_pos, jitter_pos)
+
+            base_x = xloc + tangent[0] * t + shadow_normal[0] * band_center_dist
+            base_y = yloc + tangent[1] * t + shadow_normal[1] * band_center_dist
+
+            angle = base_angle + random.uniform(-jitter_angle, jitter_angle)
+            hatch_dir = _rotate_vec(tangent, angle)
+
+            width_mult = 1.0 + random.uniform(-band_width_jitter, band_width_jitter)
+            half_len = (band_width * 0.6) * width_mult
+
+            x1 = base_x - hatch_dir[0] * half_len
+            y1 = base_y - hatch_dir[1] * half_len
+            x2 = base_x + hatch_dir[0] * half_len
+            y2 = base_y + hatch_dir[1] * half_len
+
+            _draw_hatch_line(drawing, x1, y1, x2, y2, hatch_dir, wiggle, sw,
+                            pipe_polygon, occlusion_polygon)
+
+
+# Mixed-size corner params: char -> (rotation_deg, hw_arm1, hw_arm2)
+# Base orientation (rot=0): arm1 goes South, arm2 goes East (like 'r' corner)
+# rot=90: arm1=S,arm2=W (like '7'), rot=180: arm1=N,arm2=W (like 'j'), rot=270: arm1=N,arm2=E (like 'L')
+_MIXED_CORNER_PARAMS = {
+    'mnr': (0, 30, 12),   'mn7': (90, 30, 12),
+    'mnj': (180, 30, 12), 'mnL': (270, 30, 12),
+    'nmr': (0, 12, 30),   'nm7': (90, 12, 30),
+    'nmj': (180, 12, 30), 'nmL': (270, 12, 30),
+}
+
+
+def get_mixed_corner_polygon(ch, xloc, yloc):
+    """Return Shapely Polygon for a mixed-size corner (union of center box + 2 arms)."""
+    rot_deg, hw1, hw2 = _MIXED_CORNER_PARAMS[ch]
+    hw_max = max(hw1, hw2)
+
+    def tp(px, py):
+        rx, ry = _rotate_vec((px, py), rot_deg)
+        return (xloc + rx, yloc + ry)
+
+    # Center box sized to the larger pipe
+    center = Polygon([tp(-hw_max, -hw_max), tp(hw_max, -hw_max),
+                      tp(hw_max, hw_max), tp(-hw_max, hw_max)])
+    # Arm 1 (south in base orientation): extends from center to cell edge
+    arm1 = Polygon([tp(-hw1, hw_max), tp(hw1, hw_max),
+                    tp(hw1, 50), tp(-hw1, 50)])
+    # Arm 2 (east in base orientation): extends from center to cell edge
+    arm2 = Polygon([tp(hw_max, -hw2), tp(50, -hw2),
+                    tp(50, hw2), tp(hw_max, hw2)])
+
+    poly = unary_union([center, arm1, arm2])
+    if not poly.is_valid:
+        poly = poly.buffer(0)
+    return poly
+
+
+def draw_mixed_corner_outline(drawing, ch, xloc, yloc, occlusion_poly, sw):
+    """Draw outline for a mixed-size corner by tracing its exterior ring."""
+    poly = get_mixed_corner_polygon(ch, xloc, yloc)
+    if poly is None or poly.is_empty:
+        return
+    coords = list(poly.exterior.coords)
+    for i in range(len(coords) - 1):
+        clip_and_draw_line(drawing,
+                           coords[i][0], coords[i][1],
+                           coords[i + 1][0], coords[i + 1][1],
+                           occlusion_poly, sw)
+
+
+def draw_mixed_corner_directional_shading(drawing, ch, xloc, yloc, light_dir, sw, params,
+                                           pipe_polygon=None, occlusion_polygon=None):
+    """Draw directional hatch marks on a mixed-size corner (shade each arm)."""
+    rot_deg, hw1, hw2 = _MIXED_CORNER_PARAMS[ch]
+
+    def rot_dir(dx, dy):
+        return _rotate_vec((dx, dy), rot_deg)
+
+    def to_world(px, py):
+        rx, ry = _rotate_vec((px, py), rot_deg)
+        return (xloc + rx, yloc + ry)
+
+    # Shade arm 1 (south in base orientation, hw=hw1)
+    _shade_corner_arm(drawing, to_world(0, 25), rot_dir(0, 1),
+                      rot_dir(-1, 0), rot_dir(1, 0), hw1,
+                      light_dir, sw, params, pipe_polygon, occlusion_polygon)
+    # Shade arm 2 (east in base orientation, hw=hw2)
+    _shade_corner_arm(drawing, to_world(25, 0), rot_dir(1, 0),
+                      rot_dir(0, -1), rot_dir(0, 1), hw2,
+                      light_dir, sw, params, pipe_polygon, occlusion_polygon)
+
+
+def _shade_corner_arm(drawing, center, tangent, normal_left, normal_right, hw,
+                      light_dir, sw, params, pipe_polygon, occlusion_polygon):
+    """Shade one arm of a mixed-size corner (half-tube along arm)."""
+    scale = hw / 30
+    band_width = params['band_width'] * scale
+    band_offset = params['band_offset'] * scale
+    spacing = params['spacing'] * scale
+    hatch_angle = params['angle']
+    jitter_pos = params['jitter_pos'] * scale
+    jitter_angle = params['jitter_angle']
+    band_width_jitter = params.get('band_width_jitter', 0.0)
+    wiggle = params.get('wiggle', 0.0) * scale
+
+    dot_left = _dot(normal_left, light_dir)
+    dot_right = _dot(normal_right, light_dir)
+    shadow_normal = normal_left if dot_left < dot_right else normal_right
+    band_center_dist = hw - band_offset - band_width / 2
+
+    angles_to_draw = [hatch_angle]
+    if params.get('crosshatch'):
+        angles_to_draw.append(hatch_angle + params.get('crosshatch_angle', 90))
+
+    num_hatches = max(1, int(50 / spacing))
+    cx, cy = center
+    for base_angle in angles_to_draw:
+        for i in range(num_hatches + 1):
+            t = -25 + i * (50.0 / num_hatches)
+            t += random.uniform(-jitter_pos, jitter_pos)
+
+            base_x = cx + tangent[0] * t + shadow_normal[0] * band_center_dist
+            base_y = cy + tangent[1] * t + shadow_normal[1] * band_center_dist
+
+            angle = base_angle + random.uniform(-jitter_angle, jitter_angle)
+            hatch_dir = _rotate_vec(tangent, angle)
+
+            width_mult = 1.0 + random.uniform(-band_width_jitter, band_width_jitter)
+            half_len = (band_width * 0.6) * width_mult
+
+            x1 = base_x - hatch_dir[0] * half_len
+            y1 = base_y - hatch_dir[1] * half_len
+            x2 = base_x + hatch_dir[0] * half_len
+            y2 = base_y + hatch_dir[1] * half_len
+
+            _draw_hatch_line(drawing, x1, y1, x2, y2, hatch_dir, wiggle, sw,
+                            pipe_polygon, occlusion_polygon)
+
+
 # Dodge tile params: (orientation, sign, half_width)
 _DODGE_PARAMS = {
     'z>':  ('v', +1, 30), 'z<':  ('v', -1, 30),
@@ -1318,6 +1549,14 @@ def get_pipe_polygon(ch, xloc, yloc):
         return get_diagonal_corner_polygon(ch, xloc, yloc)
     elif ch in _DIAG_ENDCAP_PARAMS:
         return get_diagonal_endcap_polygon(ch, xloc, yloc)
+
+    # Cardinal endcaps
+    elif ch in _ENDCAP_PARAMS:
+        return get_endcap_polygon(ch, xloc, yloc)
+
+    # Mixed-size corners
+    elif ch in _MIXED_CORNER_PARAMS:
+        return get_mixed_corner_polygon(ch, xloc, yloc)
 
     # Crossovers (all sizes)
     elif ch in CROSSOVER_TUBES:
@@ -2251,6 +2490,17 @@ PORTS = {
     'tdsw': {'SW': 't'},                   # Tiny endcap SW
     'tdnw': {'NW': 't'},                   # Tiny endcap NW
 
+    # Cardinal endcaps (dead-end tiles, single port)
+    'eN': {'N': 'm'},  'eS': {'S': 'm'},  'eE': {'E': 'm'},  'eW': {'W': 'm'},
+    'neN': {'N': 'n'}, 'neS': {'S': 'n'}, 'neE': {'E': 'n'}, 'neW': {'W': 'n'},
+    'teN': {'N': 't'}, 'teS': {'S': 't'}, 'teE': {'E': 't'}, 'teW': {'W': 't'},
+
+    # Mixed-size corners (medium↔narrow, 90° turns connecting different sizes)
+    'mnr': {'S': 'm', 'E': 'n'}, 'mn7': {'S': 'm', 'W': 'n'},
+    'mnj': {'N': 'm', 'W': 'n'}, 'mnL': {'N': 'm', 'E': 'n'},
+    'nmr': {'S': 'n', 'E': 'm'}, 'nm7': {'S': 'n', 'W': 'm'},
+    'nmj': {'N': 'n', 'W': 'm'}, 'nmL': {'N': 'n', 'E': 'm'},
+
     # Diagonal crossovers (medium cardinal x narrow diagonal)
     'xHa': {'W': 'm', 'E': 'm', 'SW': 'n', 'NE': 'n'},
     'xHd': {'W': 'm', 'E': 'm', 'NW': 'n', 'SE': 'n'},
@@ -2292,17 +2542,20 @@ for _dir in DIRECTION_OFFSETS:
 # Tile category mappings for weight system
 TILE_SIZE = {}
 for _ch in ['|', '-', 'r', '7', 'j', 'L', '+', 'X', 'T', 'B', 'E', 'W',
-            'z>', 'z<', 'z^', 'zv', 'cr', 'c7', 'cj', 'cL', 'dr', 'd7', 'dj', 'dL']:
+            'z>', 'z<', 'z^', 'zv', 'cr', 'c7', 'cj', 'cL', 'dr', 'd7', 'dj', 'dL',
+            'eN', 'eS', 'eE', 'eW']:
     TILE_SIZE[_ch] = 'medium'
 for _ch in ['i', '=', 'nr', 'n7', 'nj', 'nL', 'nX', 'nT', 'nB', 'nE', 'nW',
             'nz>', 'nz<', 'nz^', 'nzv', 'ncr', 'nc7', 'ncj', 'ncL', 'ndr', 'nd7', 'ndj', 'ndL',
             'nDa', 'nDd', 'naSne', 'naWse', 'naNsw', 'naEnw', 'naWne', 'naNse', 'naEsw', 'naSnw',
-            'ndce', 'ndcs', 'ndcw', 'ndcn', 'ndne', 'ndse', 'ndsw', 'ndnw']:
+            'ndce', 'ndcs', 'ndcw', 'ndcn', 'ndne', 'ndse', 'ndsw', 'ndnw',
+            'neN', 'neS', 'neE', 'neW']:
     TILE_SIZE[_ch] = 'narrow'
 for _ch in ['!', '.', 'tr', 't7', 'tj', 'tL', 'tX', 'tT', 'tB', 'tE', 'tW',
             'tz>', 'tz<', 'tz^', 'tzv', 'tcr', 'tc7', 'tcj', 'tcL', 'tdr', 'td7', 'tdj', 'tdL',
             'tDa', 'tDd', 'taSne', 'taWse', 'taNsw', 'taEnw', 'taWne', 'taNse', 'taEsw', 'taSnw',
-            'tdce', 'tdcs', 'tdcw', 'tdcn', 'tdne', 'tdse', 'tdsw', 'tdnw']:
+            'tdce', 'tdcs', 'tdcw', 'tdcn', 'tdne', 'tdse', 'tdsw', 'tdnw',
+            'teN', 'teS', 'teE', 'teW']:
     TILE_SIZE[_ch] = 'tiny'
 for _ch in ['Rv', 'RV', 'Rh', 'RH']:
     TILE_SIZE[_ch] = 'reducer_mn'
@@ -2318,6 +2571,8 @@ for _ch in ['+mt', '+tm']:
 for _ch in ['+nt', '+tn']:
     TILE_SIZE[_ch] = 'reducer_nt'
 for _ch in ['xHa', 'xHd', 'xVa', 'xVd']:
+    TILE_SIZE[_ch] = 'reducer_mn'
+for _ch in _MIXED_CORNER_PARAMS:
     TILE_SIZE[_ch] = 'reducer_mn'
 
 TILE_SHAPE = {}
@@ -2342,6 +2597,10 @@ for _ch in (list(_DIAG_PARAMS.keys()) + list(_ADAPTER_PARAMS.keys()) +
     TILE_SHAPE[_ch] = 'diagonal'
 for _ch in _DIAG_ENDCAP_PARAMS:
     TILE_SHAPE[_ch] = 'diagonal_endcap'
+for _ch in _ENDCAP_PARAMS:
+    TILE_SHAPE[_ch] = 'endcap'
+for _ch in _MIXED_CORNER_PARAMS:
+    TILE_SHAPE[_ch] = 'mixed_corner'
 
 # Crossover tile → (vertical_tube_char, horizontal_tube_char)
 # Vertical tube is drawn on top, horizontal underneath
@@ -2371,8 +2630,8 @@ def get_tile_weight(ch, tile_weights):
     """Calculate tile weight from size and shape multipliers."""
     if tile_weights is None:
         shape = TILE_SHAPE.get(ch)
-        if shape in ('diagonal', 'diagonal_endcap'):
-            return 0  # Diagonal tiles off by default
+        if shape in ('diagonal', 'diagonal_endcap', 'endcap', 'mixed_corner'):
+            return 0  # Off by default — user opts in
         if ch in CROSSOVER_TUBES:
             return 2
         if shape in ('corner', 'chamfer', 'teardrop'):
@@ -4444,6 +4703,10 @@ def render_svg(grid, stroke_width, shading_style, shading_stroke_width,
                 draw_diagonal_corner_outline(d, ch, xloc, yloc, occlusion_poly, stroke_width)
             elif ch in _DIAG_ENDCAP_PARAMS:
                 draw_diagonal_endcap_outline(d, ch, xloc, yloc, occlusion_poly, stroke_width)
+            elif ch in _ENDCAP_PARAMS:
+                draw_endcap_outline(d, ch, xloc, yloc, occlusion_poly, stroke_width)
+            elif ch in _MIXED_CORNER_PARAMS:
+                draw_mixed_corner_outline(d, ch, xloc, yloc, occlusion_poly, stroke_width)
             elif ch in ('Rv', 'RV', 'Tv', 'TV', 'Rh', 'RH', 'Th', 'TH'):
                 draw_reducer_outline(d, ch, xloc, yloc, occlusion_poly, stroke_width)
             elif ch in ('X', 'nX', 'tX'):
@@ -4539,6 +4802,12 @@ def render_svg(grid, stroke_width, shading_style, shading_stroke_width,
                 elif ch in _DIAG_ENDCAP_PARAMS:
                     draw_diagonal_endcap_directional_shading(d, ch, xloc, yloc, light_dir, shading_stroke_width, params,
                                                               pipe_polygon=pipe_poly, occlusion_polygon=occlusion_poly)
+                elif ch in _ENDCAP_PARAMS:
+                    draw_endcap_directional_shading(d, ch, xloc, yloc, light_dir, shading_stroke_width, params,
+                                                    pipe_polygon=pipe_poly, occlusion_polygon=occlusion_poly)
+                elif ch in _MIXED_CORNER_PARAMS:
+                    draw_mixed_corner_directional_shading(d, ch, xloc, yloc, light_dir, shading_stroke_width, params,
+                                                          pipe_polygon=pipe_poly, occlusion_polygon=occlusion_poly)
                 elif ch in ('Rv', 'RV', 'Tv', 'TV', 'Rh', 'RH', 'Th', 'TH'):
                     draw_reducer_directional_shading(d, ch, xloc, yloc, light_dir, shading_stroke_width, params,
                                                      pipe_polygon=pipe_poly, occlusion_polygon=occlusion_poly)
