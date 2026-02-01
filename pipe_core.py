@@ -1515,6 +1515,35 @@ def clip_and_draw_arc(drawing, cx, cy, r, start_deg, end_deg, occlusion_poly, sw
         clip_and_draw_line(drawing, x1, y1, x2, y2, occlusion_poly, sw)
 
 
+def clip_and_draw_line_inside(drawing, x1, y1, x2, y2, pipe_poly, occlusion_poly, sw):
+    """Clip a line to stay inside pipe_poly and outside occlusion_poly."""
+    if pipe_poly is None:
+        return
+    segments = clip_line_to_polygon(x1, y1, x2, y2, pipe_poly, occlusion_poly)
+    for cx1, cy1, cx2, cy2 in segments:
+        drawing.append(draw.Line(cx1, cy1, cx2, cy2,
+                                 stroke='black', stroke_width=sw, fill='none'))
+
+
+def clip_and_draw_arc_inside(drawing, cx, cy, r, start_deg, end_deg,
+                             pipe_poly, occlusion_poly, sw, num_segments=32):
+    """Approximate arc and clip each segment inside pipe_poly, outside occlusion_poly."""
+    points = []
+    for i in range(num_segments + 1):
+        frac = i / num_segments
+        angle_deg = start_deg + frac * (end_deg - start_deg)
+        angle_rad = math.radians(angle_deg)
+        x = cx + r * math.cos(angle_rad)
+        y = cy + r * math.sin(angle_rad)
+        points.append((x, y))
+
+    for i in range(len(points) - 1):
+        x1, y1 = points[i]
+        x2, y2 = points[i + 1]
+        clip_and_draw_line_inside(drawing, x1, y1, x2, y2,
+                                  pipe_poly, occlusion_poly, sw)
+
+
 # ============================================================================
 # CLIPPED PIPE OUTLINE DRAWING
 # ============================================================================
@@ -4006,8 +4035,337 @@ def draw_corner_shading_clipped(drawing, ch, xloc, yloc, style, sw, occlusion_po
             clip_and_draw_line(drawing, x1, y1, x2, y2, occlusion_poly, sw)
 
 
+# ============================================================================
+# PLOTTER-FRIENDLY PIPE DECORATIONS
+# ============================================================================
+
+DECORATION_ELIGIBLE_SHAPES = {'straight', 'reducer'}
+
+DECORATION_MIN_HW = {
+    'coupling_box': 5,
+    'round_dial': 12,
+    'valve_handle': 12,
+    'bolt_heads': 5,
+    'inspection_window': 12,
+    'flow_arrow': 12,
+}
+
+DECORATION_TYPES = list(DECORATION_MIN_HW.keys())
+
+
+def _deco_scale(hw, extra=1.0):
+    return (hw / 30.0) * extra
+
+
+def is_decoration_eligible(ch):
+    return TILE_SHAPE.get(ch) in DECORATION_ELIGIBLE_SHAPES
+
+
+def select_decorated_tiles(grid, density=0.10, seed=None):
+    """Select which tiles receive decorations and what type.
+
+    Returns dict {(x, y): decoration_type_string}.
+    """
+    width = len(grid)
+    height = len(grid[0]) if width > 0 else 0
+
+    eligible = []
+    for x in range(width):
+        for y in range(height):
+            if is_decoration_eligible(grid[x][y]):
+                eligible.append((x, y))
+
+    if not eligible:
+        return {}
+
+    rng = random.Random(seed if seed is not None else hash(str(grid)))
+    count = max(1, int(len(eligible) * density))
+    chosen = rng.sample(eligible, min(count, len(eligible)))
+
+    result = {}
+    for pos in chosen:
+        result[pos] = rng.choice(DECORATION_TYPES)
+    return result
+
+
+_TUBE_PARAMS = {
+    '|': ('v', 30), '-': ('h', 30),
+    'i': ('v', 12), '=': ('h', 12),
+    '!': ('v', 5),  '.': ('h', 5),
+}
+
+# (orient, wide_size, wide_end_sign)
+# wide_end_sign: direction along axis where the wide section is
+# Vertical: start is top (y<0), so Rv (m->n) has wide at top = -1
+# Horizontal: start is right (x>0), so Rh (m->n) has wide at right = +1
+_REDUCER_ORIENT = {
+    'Rv': ('v', 'm', -1), 'RV': ('v', 'm', +1),
+    'Tv': ('v', 'n', -1), 'TV': ('v', 'n', +1),
+    'Rh': ('h', 'm', +1), 'RH': ('h', 'm', -1),
+    'Th': ('h', 'n', +1), 'TH': ('h', 'n', -1),
+}
+
+
+def get_straight_placement(ch, xloc, yloc, light_dir, rng):
+    """Return (cx, cy, tangent, normal, hw) for decoration on a straight tile."""
+    orient, hw = _TUBE_PARAMS[ch]
+
+    if orient == 'v':
+        tangent = (0, 1)
+        normal_left, normal_right = (-1, 0), (1, 0)
+    else:
+        tangent = (1, 0)
+        normal_left, normal_right = (0, -1), (0, 1)
+
+    dot_left = _dot(normal_left, light_dir)
+    dot_right = _dot(normal_right, light_dir)
+    shadow_normal = normal_left if dot_left < dot_right else normal_right
+
+    t_offset = rng.uniform(-35, 35)
+    wall_inset = 2
+    cx = xloc + tangent[0] * t_offset + shadow_normal[0] * (hw - wall_inset)
+    cy = yloc + tangent[1] * t_offset + shadow_normal[1] * (hw - wall_inset)
+
+    return cx, cy, tangent, shadow_normal, hw
+
+
+def get_reducer_placement(ch, xloc, yloc, light_dir, rng):
+    """Return (cx, cy, tangent, normal, hw) for decoration on a reducer tile."""
+    orient, wide_size, wide_sign = _REDUCER_ORIENT[ch]
+    hw = PIPE_HALF_WIDTHS[wide_size]
+
+    if orient == 'v':
+        tangent = (0, 1)
+        normal_left, normal_right = (-1, 0), (1, 0)
+    else:
+        tangent = (1, 0)
+        normal_left, normal_right = (0, -1), (0, 1)
+
+    # Place on the wide (non-tapered) section
+    t_offset = wide_sign * rng.uniform(25, 45)
+
+    dot_left = _dot(normal_left, light_dir)
+    dot_right = _dot(normal_right, light_dir)
+    shadow_normal = normal_left if dot_left < dot_right else normal_right
+
+    wall_inset = 2
+    cx = xloc + tangent[0] * t_offset + shadow_normal[0] * (hw - wall_inset)
+    cy = yloc + tangent[1] * t_offset + shadow_normal[1] * (hw - wall_inset)
+
+    return cx, cy, tangent, shadow_normal, hw
+
+
+def draw_decoration_coupling_box(drawing, cx, cy, tangent, normal, hw,
+                                 pipe_poly, occlusion_poly, sw, rng,
+                                 extra_scale=1.0):
+    """Small rectangular collar straddling the pipe wall."""
+    scale = _deco_scale(hw, extra_scale)
+    w = 8 * scale
+    h = 6 * scale
+
+    corners = []
+    for st, sn in [(-1, -1), (1, -1), (1, 1), (-1, 1)]:
+        px = cx + tangent[0] * (st * w / 2) + normal[0] * (sn * h / 2)
+        py = cy + tangent[1] * (st * w / 2) + normal[1] * (sn * h / 2)
+        corners.append((px, py))
+
+    for i in range(4):
+        x1, y1 = corners[i]
+        x2, y2 = corners[(i + 1) % 4]
+        clip_and_draw_line_inside(drawing, x1, y1, x2, y2,
+                                  pipe_poly, occlusion_poly, sw)
+
+
+def draw_decoration_round_dial(drawing, cx, cy, tangent, normal, hw,
+                               pipe_poly, occlusion_poly, sw, rng,
+                               extra_scale=1.0):
+    """Small circle with a tick mark on the pipe wall."""
+    scale = _deco_scale(hw, extra_scale)
+    r = 4 * scale
+
+    clip_and_draw_arc_inside(drawing, cx, cy, r, 0, 360,
+                             pipe_poly, occlusion_poly, sw, num_segments=16)
+
+    tick_angle = rng.uniform(0, 360)
+    tick_rad = math.radians(tick_angle)
+    tx = cx + r * 0.8 * math.cos(tick_rad)
+    ty = cy + r * 0.8 * math.sin(tick_rad)
+    clip_and_draw_line_inside(drawing, cx, cy, tx, ty,
+                              pipe_poly, occlusion_poly, sw)
+
+
+def draw_decoration_valve_handle(drawing, cx, cy, tangent, normal, hw,
+                                 pipe_poly, occlusion_poly, sw, rng,
+                                 extra_scale=1.0):
+    """Small circle with a perpendicular crossbar."""
+    scale = _deco_scale(hw, extra_scale)
+    r = 3.5 * scale
+    bar_len = 5 * scale
+
+    clip_and_draw_arc_inside(drawing, cx, cy, r, 0, 360,
+                             pipe_poly, occlusion_poly, sw, num_segments=16)
+
+    # Crossbar along tangent
+    x1 = cx - tangent[0] * bar_len
+    y1 = cy - tangent[1] * bar_len
+    x2 = cx + tangent[0] * bar_len
+    y2 = cy + tangent[1] * bar_len
+    clip_and_draw_line_inside(drawing, x1, y1, x2, y2,
+                              pipe_poly, occlusion_poly, sw)
+
+
+def draw_decoration_bolt_heads(drawing, cx, cy, tangent, normal, hw,
+                               pipe_poly, occlusion_poly, sw, rng,
+                               extra_scale=1.0):
+    """2-4 small diamond shapes spaced along the tangent direction."""
+    scale = _deco_scale(hw, extra_scale)
+    bolt_size = 2 * scale
+    spacing = 6 * scale
+
+    if hw >= 30:
+        count = rng.choice([3, 4])
+    elif hw >= 12:
+        count = rng.choice([2, 3])
+    else:
+        count = 2
+
+    total_span = (count - 1) * spacing
+    start_t = -total_span / 2
+
+    for i in range(count):
+        t = start_t + i * spacing
+        bx = cx + tangent[0] * t
+        by = cy + tangent[1] * t
+
+        s = bolt_size / 2
+        bolt_corners = []
+        for dt, dn in [(-s, 0), (0, -s), (s, 0), (0, s)]:
+            px = bx + tangent[0] * dt + normal[0] * dn
+            py = by + tangent[1] * dt + normal[1] * dn
+            bolt_corners.append((px, py))
+
+        for j in range(4):
+            x1, y1 = bolt_corners[j]
+            x2, y2 = bolt_corners[(j + 1) % 4]
+            clip_and_draw_line_inside(drawing, x1, y1, x2, y2,
+                                      pipe_poly, occlusion_poly, sw)
+
+
+def draw_decoration_inspection_window(drawing, cx, cy, tangent, normal, hw,
+                                      pipe_poly, occlusion_poly, sw, rng,
+                                      extra_scale=1.0):
+    """Small rounded rectangle inset from the pipe wall."""
+    scale = _deco_scale(hw, extra_scale)
+    w = 10 * scale
+    h = 5 * scale
+    cr = 1.5 * scale
+
+    # Shift inward from wall so window is inside the pipe
+    inset = h / 2 + 1 * scale
+    wcx = cx - normal[0] * inset
+    wcy = cy - normal[1] * inset
+
+    hw2 = w / 2 - cr
+    hh2 = h / 2 - cr
+
+    # 4 straight edges (shortened by corner radius)
+    edges = [
+        (-hw2, h / 2, hw2, h / 2),
+        (hw2, -h / 2, -hw2, -h / 2),
+        (-w / 2, hh2, -w / 2, -hh2),
+        (w / 2, -hh2, w / 2, hh2),
+    ]
+
+    for lt1, ln1, lt2, ln2 in edges:
+        x1 = wcx + tangent[0] * lt1 + normal[0] * ln1
+        y1 = wcy + tangent[1] * lt1 + normal[1] * ln1
+        x2 = wcx + tangent[0] * lt2 + normal[0] * ln2
+        y2 = wcy + tangent[1] * lt2 + normal[1] * ln2
+        clip_and_draw_line_inside(drawing, x1, y1, x2, y2,
+                                  pipe_poly, occlusion_poly, sw)
+
+    # 4 quarter-circle corners
+    tangent_angle = math.degrees(math.atan2(tangent[1], tangent[0]))
+    corner_centers = [
+        (hw2, hh2), (-hw2, hh2), (-hw2, -hh2), (hw2, -hh2),
+    ]
+
+    for i, (lt, ln) in enumerate(corner_centers):
+        acx = wcx + tangent[0] * lt + normal[0] * ln
+        acy = wcy + tangent[1] * lt + normal[1] * ln
+        start = tangent_angle + i * 90
+        end = start + 90
+        clip_and_draw_arc_inside(drawing, acx, acy, cr, start, end,
+                                 pipe_poly, occlusion_poly, sw, num_segments=4)
+
+
+def draw_decoration_flow_arrow(drawing, cx, cy, tangent, normal, hw,
+                               pipe_poly, occlusion_poly, sw, rng,
+                               extra_scale=1.0):
+    """Chevron arrow pointing along pipe flow direction."""
+    scale = _deco_scale(hw, extra_scale)
+    arrow_len = 6 * scale
+    arrow_width = 4 * scale
+
+    # Randomly pick forward or backward along tangent
+    direction = rng.choice([-1, 1])
+    tip_x = cx + tangent[0] * arrow_len * direction
+    tip_y = cy + tangent[1] * arrow_len * direction
+    # Two base points spread perpendicular to tangent
+    base_x = cx - tangent[0] * arrow_len * direction
+    base_y = cy - tangent[1] * arrow_len * direction
+    left_x = base_x + normal[0] * arrow_width
+    left_y = base_y + normal[1] * arrow_width
+    right_x = base_x - normal[0] * arrow_width
+    right_y = base_y - normal[1] * arrow_width
+
+    # Draw as two lines from base corners to tip (open chevron)
+    clip_and_draw_line_inside(drawing, left_x, left_y, tip_x, tip_y,
+                              pipe_poly, occlusion_poly, sw)
+    clip_and_draw_line_inside(drawing, right_x, right_y, tip_x, tip_y,
+                              pipe_poly, occlusion_poly, sw)
+
+
+DECORATION_DRAW_FUNCTIONS = {
+    'coupling_box': draw_decoration_coupling_box,
+    'round_dial': draw_decoration_round_dial,
+    'valve_handle': draw_decoration_valve_handle,
+    'bolt_heads': draw_decoration_bolt_heads,
+    'inspection_window': draw_decoration_inspection_window,
+    'flow_arrow': draw_decoration_flow_arrow,
+}
+
+
+def draw_decoration(drawing, ch, xloc, yloc, deco_type, light_dir,
+                    pipe_poly, occlusion_poly, sw, rng, decoration_scale=1.0):
+    """Dispatch decoration drawing for a single tile."""
+    shape = TILE_SHAPE.get(ch)
+
+    if shape == 'straight':
+        cx, cy, tangent, normal, hw = get_straight_placement(
+            ch, xloc, yloc, light_dir, rng)
+    elif shape == 'reducer':
+        cx, cy, tangent, normal, hw = get_reducer_placement(
+            ch, xloc, yloc, light_dir, rng)
+    else:
+        return
+
+    # Check minimum size for this decoration type
+    if hw < DECORATION_MIN_HW.get(deco_type, 5):
+        deco_type = 'coupling_box' if hw >= 5 else None
+        if deco_type is None:
+            return
+
+    draw_fn = DECORATION_DRAW_FUNCTIONS[deco_type]
+    draw_fn(drawing, cx, cy, tangent, normal, hw,
+            pipe_poly, occlusion_poly, sw, rng,
+            extra_scale=decoration_scale)
+
+
 def render_svg(grid, stroke_width, shading_style, shading_stroke_width,
-               light_angle_deg=225, shading_params=None, progress_callback=None):
+               light_angle_deg=225, shading_params=None, progress_callback=None,
+               decorations_enabled=False, decoration_density=0.10,
+               decoration_stroke_width=None, decoration_scale=1.0):
     """Render a grid of pipe characters to an SVG string.
 
     All strokes are properly clipped against other pipes for pen plotting.
@@ -4021,6 +4379,9 @@ def render_svg(grid, stroke_width, shading_style, shading_stroke_width,
         light_angle_deg: light direction in degrees (0=right, 90=down, 180=left, 270=up)
         shading_params: dict with keys 'band_width', 'band_offset', 'spacing', 'angle',
                         'jitter_pos', 'jitter_angle'. Uses defaults if None.
+        decorations_enabled: if True, add plotter-friendly decorations on eligible tiles
+        decoration_density: fraction of eligible tiles to decorate (0.0 to 1.0)
+        decoration_stroke_width: stroke width for decorations (None = use stroke_width)
     """
     width = len(grid)
     height = len(grid[0]) if width > 0 else 0
@@ -4285,5 +4646,24 @@ def render_svg(grid, stroke_width, shading_style, shading_stroke_width,
             tile_count += 1
             if progress_callback:
                 progress_callback(tile_count, total_tiles)
+
+    # === PASS 3: DECORATIONS ===
+    if decorations_enabled:
+        deco_sw = decoration_stroke_width if decoration_stroke_width is not None else stroke_width
+        light_dir = _normalize((math.cos(math.radians(light_angle_deg)),
+                                math.sin(math.radians(light_angle_deg))))
+        decorated_tiles = select_decorated_tiles(grid, density=decoration_density)
+        deco_rng = random.Random(hash(str(grid)))
+
+        for (x, y), deco_type in decorated_tiles.items():
+            ch = grid[x][y]
+            xloc = (x - (width - 1) / 2.0) * 100
+            yloc = (y - (height - 1) / 2.0) * 100
+            pipe_poly = _poly_cache.get((x, y))
+            occlusion_poly = build_occlusion_polygon_cached(
+                _poly_cache, x, y, pad=pad)
+            draw_decoration(d, ch, xloc, yloc, deco_type, light_dir,
+                            pipe_poly, occlusion_poly, deco_sw, deco_rng,
+                            decoration_scale=decoration_scale)
 
     return d.as_svg()

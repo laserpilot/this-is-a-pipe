@@ -103,8 +103,8 @@ with st.sidebar:
     }
 
     st.header("Grid Settings")
-    grid_width = st.slider("Grid Width", 4, 40, 8)
-    grid_height = st.slider("Grid Height", 4, 40, 8)
+    grid_width = st.slider("Grid Width", 4, 80, 8)
+    grid_height = st.slider("Grid Height", 4, 80, 8)
 
     if grid_width > 16:
         with st.expander("Advanced Generation"):
@@ -114,17 +114,41 @@ with st.sidebar:
     else:
         stripe_width = 8
 
+    st.header("Decorations")
+    decorations_enabled = st.checkbox("Enable Pipe Decorations", value=False,
+                                       help="Add plotter-friendly decorations (couplings, dials, valves, bolts)")
+    if decorations_enabled:
+        decoration_density = st.slider("Decoration Density", 0.0, 0.50, 0.15, 0.01,
+                                        help="Fraction of eligible tiles decorated")
+        decoration_scale = st.slider("Decoration Scale", 0.3, 3.0, 1.0, 0.1,
+                                      help="Size multiplier for decorations")
+        auto_deco_stroke = st.checkbox("Match outline stroke", value=True)
+        if not auto_deco_stroke:
+            decoration_stroke_width = st.slider("Decoration Stroke Width",
+                                                 0.1, 2.0, stroke_width, 0.05)
+        else:
+            decoration_stroke_width = None
+    else:
+        decoration_density = 0.15
+        decoration_scale = 1.0
+        decoration_stroke_width = None
+
     st.header("View Settings")
     zoom_level = st.slider("Zoom", 25, 200, 100, 5, help="Zoom level (100% = fit to window)")
 
     if st.button("Regenerate Layout", type="primary"):
         st.session_state.pop('grid', None)
         st.session_state.pop('grid_dims', None)
+        st.session_state.pop('svg_string', None)
+        st.session_state.pop('render_key', None)
 
 # Generate grid if needed
 current_dims = (grid_width, grid_height)
 
 if 'grid' not in st.session_state or st.session_state.get('grid_dims') != current_dims:
+    # New grid means cached SVG is stale
+    st.session_state.pop('svg_string', None)
+    st.session_state.pop('render_key', None)
     wfc_progress = st.progress(0, text="Generating pipe layout...")
 
     def wfc_update(attempt, max_attempts, cells, total, backtracks=0):
@@ -150,36 +174,53 @@ if 'grid' not in st.session_state or st.session_state.get('grid_dims') != curren
 grid = st.session_state.grid
 
 if grid:
-    progress_bar = st.progress(0, text="Rendering tiles...")
+    # Cache rendered SVG to avoid re-rendering when only view settings change
+    render_key = (stroke_width, shading_style, shading_stroke_width,
+                  light_angle, str(shading_params),
+                  decorations_enabled, decoration_density, decoration_stroke_width,
+                  decoration_scale)
 
-    def update_progress(current, total):
-        progress_bar.progress(current / total, text="Rendering tile {} / {}".format(current, total))
+    if st.session_state.get('render_key') != render_key or 'svg_string' not in st.session_state:
+        progress_bar = st.progress(0, text="Rendering tiles...")
 
-    svg_string = pipe_core.render_svg(
-        grid, stroke_width, shading_style, shading_stroke_width,
-        light_angle_deg=light_angle, shading_params=shading_params,
-        progress_callback=update_progress
-    )
-    progress_bar.empty()
+        def update_progress(current, total):
+            progress_bar.progress(current / total, text="Rendering tile {} / {}".format(current, total))
+
+        svg_string = pipe_core.render_svg(
+            grid, stroke_width, shading_style, shading_stroke_width,
+            light_angle_deg=light_angle, shading_params=shading_params,
+            progress_callback=update_progress,
+            decorations_enabled=decorations_enabled,
+            decoration_density=decoration_density,
+            decoration_stroke_width=decoration_stroke_width,
+            decoration_scale=decoration_scale,
+        )
+        progress_bar.empty()
+        st.session_state.svg_string = svg_string
+        st.session_state.render_key = render_key
+    else:
+        svg_string = st.session_state.svg_string
+
     # Make SVG responsive for display
     display_svg = re.sub(r'width="\d+"', 'width="100%"', svg_string, count=1)
     display_svg = re.sub(r'height="\d+"', 'height="100%"', display_svg, count=1)
 
-    # Use viewport-relative sizing for zoom
-    # At 100%, SVG fills nicely; <100% shrinks to see composition; >100% enlarges for detail
-    svg_size = zoom_level
+    # Zoom via CSS transform (no re-render needed)
+    scale = zoom_level / 100.0
 
     html_content = f'''
-    <div style="background:#f0f0f0; height:100%; display:flex; align-items:center;
-                justify-content:center; overflow:auto; padding:20px; box-sizing:border-box;">
-        <div style="background:white; padding:10px; box-shadow: 0 2px 8px rgba(0,0,0,0.1);">
-            <div style="width:{svg_size}vmin; height:{svg_size}vmin;">
+    <div style="background:#f0f0f0; height:100%; overflow:auto; padding:20px; box-sizing:border-box;">
+        <div style="transform-origin:top center; transform:scale({scale});
+                    display:inline-block; background:white; padding:10px;
+                    box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+                    margin: 0 auto; display:block; width:fit-content;">
+            <div style="width:80vmin; height:80vmin;">
                 {display_svg}
             </div>
         </div>
     </div>
     '''
-    components.html(html_content, height=700, scrolling=True)
+    components.html(html_content, height=900, scrolling=True)
 
     st.download_button(
         "Download SVG",
