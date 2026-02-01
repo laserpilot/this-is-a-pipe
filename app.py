@@ -2,6 +2,7 @@ import streamlit as st
 import streamlit.components.v1 as components
 import pipe_core
 import re
+from datetime import datetime
 
 st.set_page_config(page_title="Pipe Shading Preview", layout="wide")
 st.title("Pipe Shading Preview")
@@ -119,6 +120,18 @@ with st.sidebar:
     else:
         stripe_width = 8
 
+    st.header("Multi-Layer")
+    multilayer_enabled = st.checkbox("Enable Multi-Layer", value=False,
+                                      help="Overlay two independent pipe networks")
+    if multilayer_enabled:
+        layer_0_color = st.text_input("Bottom Layer Color", value="red",
+                                       help="data-color attribute for pen plotter")
+        layer_1_color = st.text_input("Top Layer Color", value="black",
+                                       help="data-color attribute for pen plotter")
+    else:
+        layer_0_color = "red"
+        layer_1_color = "black"
+
     st.header("Decorations")
     decorations_enabled = st.checkbox("Enable Pipe Decorations", value=False,
                                        help="Add plotter-friendly decorations (couplings, dials, valves, bolts)")
@@ -143,47 +156,74 @@ with st.sidebar:
 
     if st.button("Regenerate Layout", type="primary"):
         st.session_state.pop('grid', None)
+        st.session_state.pop('grids', None)
         st.session_state.pop('grid_dims', None)
         st.session_state.pop('svg_string', None)
         st.session_state.pop('render_key', None)
 
-# Generate grid if needed
-current_dims = (grid_width, grid_height)
+# Generate grid(s) if needed
+current_dims = (grid_width, grid_height, multilayer_enabled)
+
+def _run_wfc(progress_label="", progress_scale=1.0, progress_offset=0.0, stripe_offset=0):
+    """Run WFC with progress callback."""
+    def wfc_update(attempt, max_attempts, cells, total, backtracks=0):
+        pct = progress_offset + min(cells / total, 1.0) * progress_scale
+        bt_text = " ({} backtracks)".format(backtracks) if backtracks else ""
+        wfc_progress.progress(min(pct, 1.0),
+                              text="{} Attempt {} — {}/{} cells{}".format(
+                                  progress_label, attempt, cells, total, bt_text))
+
+    if grid_width > 16:
+        return pipe_core.wave_function_collapse_striped(
+            grid_width, grid_height, stripe_width=stripe_width,
+            tile_weights=tile_weights, progress_callback=wfc_update,
+            stripe_offset=stripe_offset)
+    else:
+        return pipe_core.wave_function_collapse(
+            grid_width, grid_height, tile_weights=tile_weights,
+            progress_callback=wfc_update)
 
 if 'grid' not in st.session_state or st.session_state.get('grid_dims') != current_dims:
     # New grid means cached SVG is stale
     st.session_state.pop('svg_string', None)
     st.session_state.pop('render_key', None)
+    st.session_state.pop('grids', None)
     wfc_progress = st.progress(0, text="Generating pipe layout...")
 
-    def wfc_update(attempt, max_attempts, cells, total, backtracks=0):
-        pct = min(cells / total, 1.0)
-        bt_text = " ({} backtracks)".format(backtracks) if backtracks else ""
-        wfc_progress.progress(pct, text="Attempt {} — {}/{} cells{}".format(
-            attempt, cells, total, bt_text))
-
-    if grid_width > 16:
-        grid = pipe_core.wave_function_collapse_striped(
-            grid_width, grid_height, stripe_width=stripe_width,
-            tile_weights=tile_weights,
-            progress_callback=wfc_update)
+    if multilayer_enabled:
+        grid_0 = _run_wfc("Layer 1/2 —", progress_scale=0.5, progress_offset=0.0)
+        grid_1 = _run_wfc("Layer 2/2 —", progress_scale=0.5, progress_offset=0.5,
+                           stripe_offset=stripe_width // 2)
+        wfc_progress.empty()
+        if grid_0 and grid_1:
+            st.session_state.grids = [grid_0, grid_1]
+            st.session_state.grid = grid_0
+        else:
+            st.session_state.grids = None
+            st.session_state.grid = None
     else:
-        grid = pipe_core.wave_function_collapse(
-            grid_width, grid_height,
-            tile_weights=tile_weights,
-            progress_callback=wfc_update)
-    wfc_progress.empty()
-    st.session_state.grid = grid
+        grid = _run_wfc(progress_scale=1.0)
+        wfc_progress.empty()
+        st.session_state.grid = grid
+        st.session_state.grids = None
     st.session_state.grid_dims = current_dims
 
-grid = st.session_state.grid
+# Determine if we have valid data to render
+has_grid = False
+if multilayer_enabled:
+    grids = st.session_state.get('grids')
+    has_grid = grids is not None and len(grids) == 2
+else:
+    grid = st.session_state.get('grid')
+    has_grid = grid is not None
 
-if grid:
+if has_grid:
     # Cache rendered SVG to avoid re-rendering when only view settings change
     render_key = (stroke_width, shading_style, shading_stroke_width,
                   light_angle, str(shading_params),
                   decorations_enabled, decoration_density, decoration_stroke_width,
-                  decoration_scale)
+                  decoration_scale,
+                  multilayer_enabled, layer_0_color, layer_1_color)
 
     if st.session_state.get('render_key') != render_key or 'svg_string' not in st.session_state:
         progress_bar = st.progress(0, text="Rendering tiles...")
@@ -191,15 +231,29 @@ if grid:
         def update_progress(current, total):
             progress_bar.progress(current / total, text="Rendering tile {} / {}".format(current, total))
 
-        svg_string = pipe_core.render_svg(
-            grid, stroke_width, shading_style, shading_stroke_width,
-            light_angle_deg=light_angle, shading_params=shading_params,
-            progress_callback=update_progress,
-            decorations_enabled=decorations_enabled,
-            decoration_density=decoration_density,
-            decoration_stroke_width=decoration_stroke_width,
-            decoration_scale=decoration_scale,
-        )
+        if multilayer_enabled:
+            svg_string = pipe_core.render_multilayer_svg(
+                st.session_state.grids,
+                stroke_width, shading_style, shading_stroke_width,
+                light_angle_deg=light_angle, shading_params=shading_params,
+                progress_callback=update_progress,
+                decorations_enabled=decorations_enabled,
+                decoration_density=decoration_density,
+                decoration_stroke_width=decoration_stroke_width,
+                decoration_scale=decoration_scale,
+                layer_colors=[layer_0_color, layer_1_color],
+            )
+        else:
+            svg_string = pipe_core.render_svg(
+                st.session_state.grid,
+                stroke_width, shading_style, shading_stroke_width,
+                light_angle_deg=light_angle, shading_params=shading_params,
+                progress_callback=update_progress,
+                decorations_enabled=decorations_enabled,
+                decoration_density=decoration_density,
+                decoration_stroke_width=decoration_stroke_width,
+                decoration_scale=decoration_scale,
+            )
         progress_bar.empty()
         st.session_state.svg_string = svg_string
         st.session_state.render_key = render_key
@@ -227,10 +281,11 @@ if grid:
     '''
     components.html(html_content, height=900, scrolling=True)
 
+    timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
     st.download_button(
         "Download SVG",
         svg_string,
-        file_name="pipes-preview.svg",
+        file_name="pipes-{}.svg".format(timestamp),
         mime="image/svg+xml"
     )
 else:

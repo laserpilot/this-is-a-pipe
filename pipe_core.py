@@ -1654,6 +1654,18 @@ def build_occlusion_polygon_cached(poly_cache, exclude_x, exclude_y, pad=0):
     return unary_union(polygons).buffer(0)
 
 
+def _build_full_layer_union(poly_cache, pad=0):
+    """Union of ALL polygons in a layer's cache (for cross-layer occlusion)."""
+    if not poly_cache:
+        return None
+    polygons = []
+    for poly in poly_cache.values():
+        if pad > 0:
+            poly = poly.buffer(pad, join_style=2)
+        polygons.append(poly)
+    return unary_union(polygons).buffer(0)
+
+
 def clip_line_to_polygon(x1, y1, x2, y2, polygon, exclusion=None):
     """Clip a line segment to stay within polygon and outside exclusion.
 
@@ -3233,14 +3245,15 @@ def _solve_stripe(width, height, tile_weights=None, max_attempts=200,
 
 def wave_function_collapse_striped(width, height, stripe_width=8,
                                     tile_weights=None, max_attempts=200,
-                                    progress_callback=None):
+                                    progress_callback=None, stripe_offset=0):
     """Generate large grids by solving vertical stripes left-to-right.
 
     Each stripe is an independent WFC problem with constrained left edge
     matching the previous stripe. Much more scalable than full-grid WFC.
 
     Stripe widths are randomized around the base stripe_width to avoid
-    visible regular seams.
+    visible regular seams. stripe_offset shifts the first boundary, useful
+    for multi-layer staggering so seams from different layers don't align.
     """
     final_grid = [['' for _ in range(height)] for _ in range(width)]
 
@@ -3248,6 +3261,12 @@ def wave_function_collapse_striped(width, height, stripe_width=8,
     min_sw = max(4, stripe_width - 3)
     max_sw = stripe_width + 3
     stripe_starts = [0]
+
+    # First stripe may be shorter if offset is specified (for multi-layer staggering)
+    if stripe_offset > 0:
+        first_width = max(3, min(stripe_offset, width))
+        stripe_starts.append(min(first_width, width))
+
     while stripe_starts[-1] < width:
         sw = random.randint(min_sw, max_sw)
         next_start = min(stripe_starts[-1] + sw, width)
@@ -4621,6 +4640,304 @@ def draw_decoration(drawing, ch, xloc, yloc, deco_type, light_dir,
             extra_scale=decoration_scale)
 
 
+def _render_layer_to_group(
+    grid, outlines_target, shading_target, decorations_target,
+    poly_cache, extra_occlusion_poly,
+    stroke_width, shading_style, shading_stroke_width,
+    light_angle_deg=225, shading_params=None,
+    decorations_enabled=False, decoration_density=0.10,
+    decoration_stroke_width=None, decoration_scale=1.0,
+    progress_callback=None, progress_offset=0, progress_total=None,
+):
+    """Render a single grid layer's outlines, shading, and decorations.
+
+    All draw functions append to the provided target objects (Drawing or Group).
+    extra_occlusion_poly is merged into each tile's occlusion for cross-layer clipping.
+    """
+    width = len(grid)
+    height = len(grid[0]) if width > 0 else 0
+    pad = max(stroke_width, shading_stroke_width) * 0.5 + 0.1
+
+    total_tiles = progress_total if progress_total is not None else width * height
+    tile_count = 0
+    for x in range(width):
+        for y in range(height):
+            ch = grid[x][y]
+            xloc = (x - (width - 1) / 2.0) * 100
+            yloc = (y - (height - 1) / 2.0) * 100
+
+            # Build occlusion polygon using cached polygons
+            occlusion_poly = build_occlusion_polygon_cached(
+                poly_cache, x, y, pad=pad
+            )
+
+            # Merge cross-layer occlusion
+            if extra_occlusion_poly is not None:
+                if occlusion_poly is not None:
+                    occlusion_poly = occlusion_poly.union(extra_occlusion_poly)
+                else:
+                    occlusion_poly = extra_occlusion_poly
+
+            # Draw pipe outlines with clipping
+            if ch in ('|', '-', 'i', '=', '!', '.'):
+                draw_tube_outline(outlines_target, ch, xloc, yloc, occlusion_poly, stroke_width)
+            elif ch in ('r', '7', 'j', 'L'):
+                draw_corner_outline(outlines_target, ch, xloc, yloc, occlusion_poly, stroke_width)
+            elif ch in ('nr', 'n7', 'nj', 'nL'):
+                draw_sized_corner_outline(outlines_target, ch, xloc, yloc, 12, occlusion_poly, stroke_width)
+            elif ch in ('tr', 't7', 'tj', 'tL'):
+                draw_sized_corner_outline(outlines_target, ch, xloc, yloc, 5, occlusion_poly, stroke_width)
+            elif ch in _DODGE_PARAMS:
+                draw_dodge_outline(outlines_target, ch, xloc, yloc, occlusion_poly, stroke_width)
+            elif ch in _CHAMFER_PARAMS:
+                draw_chamfer_outline(outlines_target, ch, xloc, yloc, occlusion_poly, stroke_width)
+            elif ch in _TEARDROP_PARAMS:
+                draw_teardrop_outline(outlines_target, ch, xloc, yloc, occlusion_poly, stroke_width)
+            elif ch in _DIAG_PARAMS:
+                draw_diagonal_outline(outlines_target, ch, xloc, yloc, occlusion_poly, stroke_width)
+            elif ch in _ADAPTER_PARAMS:
+                draw_adapter_outline(outlines_target, ch, xloc, yloc, occlusion_poly, stroke_width)
+            elif ch in _DIAG_CORNER_PARAMS:
+                draw_diagonal_corner_outline(outlines_target, ch, xloc, yloc, occlusion_poly, stroke_width)
+            elif ch in _DIAG_ENDCAP_PARAMS:
+                draw_diagonal_endcap_outline(outlines_target, ch, xloc, yloc, occlusion_poly, stroke_width)
+            elif ch in _ENDCAP_PARAMS:
+                draw_endcap_outline(outlines_target, ch, xloc, yloc, occlusion_poly, stroke_width)
+            elif ch in _MIXED_CORNER_PARAMS:
+                draw_mixed_corner_outline(outlines_target, ch, xloc, yloc, occlusion_poly, stroke_width)
+            elif ch in ('Rv', 'RV', 'Tv', 'TV', 'Rh', 'RH', 'Th', 'TH'):
+                draw_reducer_outline(outlines_target, ch, xloc, yloc, occlusion_poly, stroke_width)
+            elif ch in ('X', 'nX', 'tX'):
+                hw = 30 if ch == 'X' else (12 if ch == 'nX' else 5)
+                draw_cross_outline(outlines_target, xloc, yloc, occlusion_poly, stroke_width, half_width=hw)
+            elif ch in ('T', 'B', 'E', 'W', 'nT', 'nB', 'nE', 'nW', 'tT', 'tB', 'tE', 'tW'):
+                if ch in ('T', 'B', 'E', 'W'):
+                    hw = 30
+                    base_ch = ch
+                elif ch.startswith('n'):
+                    hw = 12
+                    base_ch = ch[1:]
+                else:
+                    hw = 5
+                    base_ch = ch[1:]
+                draw_tee_outline(outlines_target, base_ch, xloc, yloc, occlusion_poly, stroke_width, half_width=hw)
+            elif ch in CROSSOVER_TUBES:
+                # Crossover: draw with depth ordering (vertical on top of horizontal)
+                v_ch, h_ch = CROSSOVER_TUBES[ch]
+                v_poly = get_tube_polygon(v_ch, xloc, yloc)
+                if v_poly:
+                    v_poly = v_poly.buffer(pad, join_style=2)
+
+                # Draw horizontal first (underneath)
+                h_occlusion = occlusion_poly
+                if h_occlusion is not None and v_poly is not None:
+                    h_occlusion = h_occlusion.union(v_poly)
+                elif v_poly is not None:
+                    h_occlusion = v_poly
+                draw_tube_outline(outlines_target, h_ch, xloc, yloc, h_occlusion, stroke_width)
+
+                # Draw vertical on top (only clipped against other pipes, not horizontal)
+                draw_tube_outline(outlines_target, v_ch, xloc, yloc, occlusion_poly, stroke_width)
+
+            elif ch in DIAG_CROSSOVER_TUBES:
+                # Diagonal crossover: diagonal on top, cardinal tube underneath
+                tube_ch, diag_ch = DIAG_CROSSOVER_TUBES[ch]
+                diag_poly = get_diagonal_polygon(diag_ch, xloc, yloc)
+                if diag_poly:
+                    diag_poly = diag_poly.buffer(pad, join_style=2)
+
+                # Draw tube underneath — clipped by diagonal + neighbors
+                tube_occlusion = occlusion_poly
+                if tube_occlusion is not None and diag_poly is not None:
+                    tube_occlusion = tube_occlusion.union(diag_poly)
+                elif diag_poly is not None:
+                    tube_occlusion = diag_poly
+                draw_tube_outline(outlines_target, tube_ch, xloc, yloc, tube_occlusion, stroke_width)
+
+                # Draw diagonal on top — only clipped by neighbors
+                draw_diagonal_outline(outlines_target, diag_ch, xloc, yloc, occlusion_poly, stroke_width)
+
+            # Draw shading with clipping
+            if shading_style == 'directional-hatch':
+                params = shading_params if shading_params else DEFAULT_SHADING_PARAMS
+                light_dir = _normalize((math.cos(math.radians(light_angle_deg)),
+                                        math.sin(math.radians(light_angle_deg))))
+                pipe_poly = get_pipe_polygon(ch, xloc, yloc)
+                if pipe_poly:
+                    pipe_poly = pipe_poly.buffer(0)  # Clean geometry
+
+                if ch in ('|', '-', 'i', '=', '!', '.'):
+                    draw_tube_directional_shading(shading_target, ch, xloc, yloc, light_dir, shading_stroke_width, params,
+                                                  pipe_polygon=pipe_poly, occlusion_polygon=occlusion_poly)
+                elif ch in ('r', '7', 'j', 'L'):
+                    draw_corner_directional_shading(shading_target, ch, xloc, yloc, light_dir, shading_stroke_width, params,
+                                                    pipe_polygon=pipe_poly, occlusion_polygon=occlusion_poly)
+                elif ch in ('nr', 'n7', 'nj', 'nL'):
+                    draw_sized_corner_directional_shading(shading_target, ch, xloc, yloc, 12, light_dir, shading_stroke_width, params,
+                                                          pipe_polygon=pipe_poly, occlusion_polygon=occlusion_poly)
+                elif ch in ('tr', 't7', 'tj', 'tL'):
+                    draw_sized_corner_directional_shading(shading_target, ch, xloc, yloc, 5, light_dir, shading_stroke_width, params,
+                                                          pipe_polygon=pipe_poly, occlusion_polygon=occlusion_poly)
+                elif ch in _DODGE_PARAMS:
+                    draw_dodge_directional_shading(shading_target, ch, xloc, yloc, light_dir, shading_stroke_width, params,
+                                                    pipe_polygon=pipe_poly, occlusion_polygon=occlusion_poly)
+                elif ch in _CHAMFER_PARAMS:
+                    draw_chamfer_directional_shading(shading_target, ch, xloc, yloc, light_dir, shading_stroke_width, params,
+                                                      pipe_polygon=pipe_poly, occlusion_polygon=occlusion_poly)
+                elif ch in _TEARDROP_PARAMS:
+                    draw_teardrop_directional_shading(shading_target, ch, xloc, yloc, light_dir, shading_stroke_width, params,
+                                                       pipe_polygon=pipe_poly, occlusion_polygon=occlusion_poly)
+                elif ch in _DIAG_PARAMS:
+                    draw_diagonal_directional_shading(shading_target, ch, xloc, yloc, light_dir, shading_stroke_width, params,
+                                                      pipe_polygon=pipe_poly, occlusion_polygon=occlusion_poly)
+                elif ch in _ADAPTER_PARAMS:
+                    draw_adapter_directional_shading(shading_target, ch, xloc, yloc, light_dir, shading_stroke_width, params,
+                                                     pipe_polygon=pipe_poly, occlusion_polygon=occlusion_poly)
+                elif ch in _DIAG_CORNER_PARAMS:
+                    draw_diagonal_corner_directional_shading(shading_target, ch, xloc, yloc, light_dir, shading_stroke_width, params,
+                                                              pipe_polygon=pipe_poly, occlusion_polygon=occlusion_poly)
+                elif ch in _DIAG_ENDCAP_PARAMS:
+                    draw_diagonal_endcap_directional_shading(shading_target, ch, xloc, yloc, light_dir, shading_stroke_width, params,
+                                                              pipe_polygon=pipe_poly, occlusion_polygon=occlusion_poly)
+                elif ch in _ENDCAP_PARAMS:
+                    draw_endcap_directional_shading(shading_target, ch, xloc, yloc, light_dir, shading_stroke_width, params,
+                                                    pipe_polygon=pipe_poly, occlusion_polygon=occlusion_poly)
+                elif ch in _MIXED_CORNER_PARAMS:
+                    draw_mixed_corner_directional_shading(shading_target, ch, xloc, yloc, light_dir, shading_stroke_width, params,
+                                                          pipe_polygon=pipe_poly, occlusion_polygon=occlusion_poly)
+                elif ch in ('Rv', 'RV', 'Tv', 'TV', 'Rh', 'RH', 'Th', 'TH'):
+                    draw_reducer_directional_shading(shading_target, ch, xloc, yloc, light_dir, shading_stroke_width, params,
+                                                     pipe_polygon=pipe_poly, occlusion_polygon=occlusion_poly)
+                elif ch in ('X', 'nX', 'tX'):
+                    hw = 30 if ch == 'X' else (12 if ch == 'nX' else 5)
+                    draw_cross_directional_shading(shading_target, xloc, yloc, light_dir, shading_stroke_width, params,
+                                                   pipe_polygon=pipe_poly, occlusion_polygon=occlusion_poly,
+                                                   half_width=hw)
+                elif ch in ('T', 'B', 'E', 'W', 'nT', 'nB', 'nE', 'nW', 'tT', 'tB', 'tE', 'tW'):
+                    if ch in ('T', 'B', 'E', 'W'):
+                        hw = 30
+                        base_ch = ch
+                    elif ch.startswith('n'):
+                        hw = 12
+                        base_ch = ch[1:]
+                    else:
+                        hw = 5
+                        base_ch = ch[1:]
+                    draw_tee_directional_shading(shading_target, base_ch, xloc, yloc, light_dir, shading_stroke_width, params,
+                                                 pipe_polygon=pipe_poly, occlusion_polygon=occlusion_poly,
+                                                 half_width=hw)
+                elif ch in CROSSOVER_TUBES:
+                    v_ch, h_ch = CROSSOVER_TUBES[ch]
+                    v_poly = get_tube_polygon(v_ch, xloc, yloc)
+                    h_poly = get_tube_polygon(h_ch, xloc, yloc)
+                    if v_poly:
+                        v_poly = v_poly.buffer(0)
+                    if h_poly:
+                        h_poly = h_poly.buffer(0)
+
+                    h_occlusion = occlusion_poly
+                    if h_occlusion is not None and v_poly is not None:
+                        v_buffered = v_poly.buffer(pad, join_style=2)
+                        h_occlusion = h_occlusion.union(v_buffered)
+                    elif v_poly is not None:
+                        h_occlusion = v_poly.buffer(pad, join_style=2)
+
+                    draw_tube_directional_shading(shading_target, h_ch, xloc, yloc, light_dir, shading_stroke_width, params,
+                                                  pipe_polygon=h_poly, occlusion_polygon=h_occlusion)
+                    draw_tube_directional_shading(shading_target, v_ch, xloc, yloc, light_dir, shading_stroke_width, params,
+                                                  pipe_polygon=v_poly, occlusion_polygon=occlusion_poly)
+
+                elif ch in DIAG_CROSSOVER_TUBES:
+                    tube_ch, diag_ch = DIAG_CROSSOVER_TUBES[ch]
+                    tube_poly = get_tube_polygon(tube_ch, xloc, yloc)
+                    diag_poly = get_diagonal_polygon(diag_ch, xloc, yloc)
+                    if tube_poly:
+                        tube_poly = tube_poly.buffer(0)
+                    if diag_poly:
+                        diag_poly = diag_poly.buffer(0)
+
+                    # Tube shading: clipped by diagonal (on top) + neighbors
+                    tube_occlusion = occlusion_poly
+                    if tube_occlusion is not None and diag_poly is not None:
+                        diag_buffered = diag_poly.buffer(pad, join_style=2)
+                        tube_occlusion = tube_occlusion.union(diag_buffered)
+                    elif diag_poly is not None:
+                        tube_occlusion = diag_poly.buffer(pad, join_style=2)
+
+                    draw_tube_directional_shading(shading_target, tube_ch, xloc, yloc, light_dir,
+                                                   shading_stroke_width, params,
+                                                   pipe_polygon=tube_poly,
+                                                   occlusion_polygon=tube_occlusion)
+                    draw_diagonal_directional_shading(shading_target, diag_ch, xloc, yloc, light_dir,
+                                                       shading_stroke_width, params,
+                                                       pipe_polygon=diag_poly,
+                                                       occlusion_polygon=occlusion_poly)
+
+            elif shading_style in ('accent', 'hatch', 'double-wall'):
+                # Draw other shading styles with clipping
+                if ch in ('|', '-'):
+                    draw_tube_shading_clipped(shading_target, ch, xloc, yloc, shading_style, shading_stroke_width, occlusion_poly)
+                elif ch in ('r', '7', 'j', 'L'):
+                    draw_corner_shading_clipped(shading_target, ch, xloc, yloc, shading_style, shading_stroke_width, occlusion_poly)
+                elif ch in CROSSOVER_TUBES:
+                    v_ch, h_ch = CROSSOVER_TUBES[ch]
+                    v_poly = get_tube_polygon(v_ch, xloc, yloc)
+                    if v_poly:
+                        v_poly = v_poly.buffer(pad, join_style=2)
+
+                    h_occlusion = occlusion_poly
+                    if h_occlusion is not None and v_poly is not None:
+                        h_occlusion = h_occlusion.union(v_poly)
+                    elif v_poly is not None:
+                        h_occlusion = v_poly
+
+                    draw_tube_shading_clipped(shading_target, h_ch, xloc, yloc, shading_style, shading_stroke_width, h_occlusion)
+                    draw_tube_shading_clipped(shading_target, v_ch, xloc, yloc, shading_style, shading_stroke_width, occlusion_poly)
+
+                elif ch in DIAG_CROSSOVER_TUBES:
+                    tube_ch, diag_ch = DIAG_CROSSOVER_TUBES[ch]
+                    diag_poly = get_diagonal_polygon(diag_ch, xloc, yloc)
+                    if diag_poly:
+                        diag_poly = diag_poly.buffer(pad, join_style=2)
+
+                    tube_occlusion = occlusion_poly
+                    if tube_occlusion is not None and diag_poly is not None:
+                        tube_occlusion = tube_occlusion.union(diag_poly)
+                    elif diag_poly is not None:
+                        tube_occlusion = diag_poly
+
+                    draw_tube_shading_clipped(shading_target, tube_ch, xloc, yloc, shading_style,
+                                               shading_stroke_width, tube_occlusion)
+
+            tile_count += 1
+            if progress_callback:
+                progress_callback(progress_offset + tile_count, total_tiles)
+
+    # === DECORATIONS ===
+    if decorations_enabled and decorations_target is not None:
+        deco_sw = decoration_stroke_width if decoration_stroke_width is not None else stroke_width
+        light_dir = _normalize((math.cos(math.radians(light_angle_deg)),
+                                math.sin(math.radians(light_angle_deg))))
+        decorated_tiles = select_decorated_tiles(grid, density=decoration_density)
+        deco_rng = random.Random(hash(str(grid)))
+
+        for (x, y), deco_type in decorated_tiles.items():
+            ch = grid[x][y]
+            xloc = (x - (width - 1) / 2.0) * 100
+            yloc = (y - (height - 1) / 2.0) * 100
+            pipe_poly = poly_cache.get((x, y))
+            occlusion_poly = build_occlusion_polygon_cached(
+                poly_cache, x, y, pad=pad)
+            if extra_occlusion_poly is not None:
+                if occlusion_poly is not None:
+                    occlusion_poly = occlusion_poly.union(extra_occlusion_poly)
+                else:
+                    occlusion_poly = extra_occlusion_poly
+            draw_decoration(decorations_target, ch, xloc, yloc, deco_type, light_dir,
+                            pipe_poly, occlusion_poly, deco_sw, deco_rng,
+                            decoration_scale=decoration_scale)
+
+
 def render_svg(grid, stroke_width, shading_style, shading_stroke_width,
                light_angle_deg=225, shading_params=None, progress_callback=None,
                decorations_enabled=False, decoration_density=0.10,
@@ -4665,274 +4982,136 @@ def render_svg(grid, stroke_width, shading_style, shading_stroke_width,
                 if poly.is_valid and not poly.is_empty:
                     _poly_cache[(x, y)] = poly
 
-    # Draw each pipe with proper clipping against all other pipes
-    total_tiles = width * height
-    tile_count = 0
-    for x in range(width):
-        for y in range(height):
-            ch = grid[x][y]
-            # Center the grid properly (works for both odd and even dimensions)
-            xloc = (x - (width - 1) / 2.0) * 100
-            yloc = (y - (height - 1) / 2.0) * 100
+    # Delegate to shared helper (flat output — Drawing as all targets, no extra occlusion)
+    _render_layer_to_group(
+        grid, d, d, d, _poly_cache, None,
+        stroke_width, shading_style, shading_stroke_width,
+        light_angle_deg=light_angle_deg, shading_params=shading_params,
+        decorations_enabled=decorations_enabled,
+        decoration_density=decoration_density,
+        decoration_stroke_width=decoration_stroke_width,
+        decoration_scale=decoration_scale,
+        progress_callback=progress_callback,
+        progress_offset=0,
+        progress_total=width * height,
+    )
 
-            # Build occlusion polygon using cached polygons
-            occlusion_poly = build_occlusion_polygon_cached(
-                _poly_cache, x, y, pad=pad
-            )
+    return d.as_svg()
 
-            # Draw pipe outlines with clipping
-            if ch in ('|', '-', 'i', '=', '!', '.'):
-                draw_tube_outline(d, ch, xloc, yloc, occlusion_poly, stroke_width)
-            elif ch in ('r', '7', 'j', 'L'):
-                draw_corner_outline(d, ch, xloc, yloc, occlusion_poly, stroke_width)
-            elif ch in ('nr', 'n7', 'nj', 'nL'):
-                draw_sized_corner_outline(d, ch, xloc, yloc, 12, occlusion_poly, stroke_width)
-            elif ch in ('tr', 't7', 'tj', 'tL'):
-                draw_sized_corner_outline(d, ch, xloc, yloc, 5, occlusion_poly, stroke_width)
-            elif ch in _DODGE_PARAMS:
-                draw_dodge_outline(d, ch, xloc, yloc, occlusion_poly, stroke_width)
-            elif ch in _CHAMFER_PARAMS:
-                draw_chamfer_outline(d, ch, xloc, yloc, occlusion_poly, stroke_width)
-            elif ch in _TEARDROP_PARAMS:
-                draw_teardrop_outline(d, ch, xloc, yloc, occlusion_poly, stroke_width)
-            elif ch in _DIAG_PARAMS:
-                draw_diagonal_outline(d, ch, xloc, yloc, occlusion_poly, stroke_width)
-            elif ch in _ADAPTER_PARAMS:
-                draw_adapter_outline(d, ch, xloc, yloc, occlusion_poly, stroke_width)
-            elif ch in _DIAG_CORNER_PARAMS:
-                draw_diagonal_corner_outline(d, ch, xloc, yloc, occlusion_poly, stroke_width)
-            elif ch in _DIAG_ENDCAP_PARAMS:
-                draw_diagonal_endcap_outline(d, ch, xloc, yloc, occlusion_poly, stroke_width)
-            elif ch in _ENDCAP_PARAMS:
-                draw_endcap_outline(d, ch, xloc, yloc, occlusion_poly, stroke_width)
-            elif ch in _MIXED_CORNER_PARAMS:
-                draw_mixed_corner_outline(d, ch, xloc, yloc, occlusion_poly, stroke_width)
-            elif ch in ('Rv', 'RV', 'Tv', 'TV', 'Rh', 'RH', 'Th', 'TH'):
-                draw_reducer_outline(d, ch, xloc, yloc, occlusion_poly, stroke_width)
-            elif ch in ('X', 'nX', 'tX'):
-                hw = 30 if ch == 'X' else (12 if ch == 'nX' else 5)
-                draw_cross_outline(d, xloc, yloc, occlusion_poly, stroke_width, half_width=hw)
-            elif ch in ('T', 'B', 'E', 'W', 'nT', 'nB', 'nE', 'nW', 'tT', 'tB', 'tE', 'tW'):
-                if ch in ('T', 'B', 'E', 'W'):
-                    hw = 30
-                    base_ch = ch
-                elif ch.startswith('n'):
-                    hw = 12
-                    base_ch = ch[1:]
-                else:
-                    hw = 5
-                    base_ch = ch[1:]
-                draw_tee_outline(d, base_ch, xloc, yloc, occlusion_poly, stroke_width, half_width=hw)
-            elif ch in CROSSOVER_TUBES:
-                # Crossover: draw with depth ordering (vertical on top of horizontal)
-                v_ch, h_ch = CROSSOVER_TUBES[ch]
-                v_poly = get_tube_polygon(v_ch, xloc, yloc)
-                if v_poly:
-                    v_poly = v_poly.buffer(pad, join_style=2)
 
-                # Draw horizontal first (underneath)
-                h_occlusion = occlusion_poly
-                if h_occlusion is not None and v_poly is not None:
-                    h_occlusion = h_occlusion.union(v_poly)
-                elif v_poly is not None:
-                    h_occlusion = v_poly
-                draw_tube_outline(d, h_ch, xloc, yloc, h_occlusion, stroke_width)
+def render_multilayer_svg(
+    grids, stroke_width, shading_style, shading_stroke_width,
+    light_angle_deg=225, shading_params=None, progress_callback=None,
+    decorations_enabled=False, decoration_density=0.10,
+    decoration_stroke_width=None, decoration_scale=1.0,
+    layer_colors=None,
+):
+    """Render multiple overlapping pipe layers to a single SVG string.
 
-                # Draw vertical on top (only clipped against other pipes, not horizontal)
-                draw_tube_outline(d, v_ch, xloc, yloc, occlusion_poly, stroke_width)
+    Layers are rendered bottom-to-top. Each layer gets its own SVG group
+    hierarchy. Bottom layers are clipped against all layers above them.
 
-            elif ch in DIAG_CROSSOVER_TUBES:
-                # Diagonal crossover: diagonal on top, cardinal tube underneath
-                tube_ch, diag_ch = DIAG_CROSSOVER_TUBES[ch]
-                diag_poly = get_diagonal_polygon(diag_ch, xloc, yloc)
-                if diag_poly:
-                    diag_poly = diag_poly.buffer(pad, join_style=2)
+    Args:
+        grids: list of 2D pipe character grids. grids[0] = bottom layer,
+               grids[-1] = top layer. All grids must have same dimensions.
+        layer_colors: list of color names for data-color attribute on layer groups.
+                      Defaults to ['red', 'black'] for 2 layers.
+        (other args same as render_svg)
 
-                # Draw tube underneath — clipped by diagonal + neighbors
-                tube_occlusion = occlusion_poly
-                if tube_occlusion is not None and diag_poly is not None:
-                    tube_occlusion = tube_occlusion.union(diag_poly)
-                elif diag_poly is not None:
-                    tube_occlusion = diag_poly
-                draw_tube_outline(d, tube_ch, xloc, yloc, tube_occlusion, stroke_width)
+    Returns:
+        SVG string with grouped layer structure:
+        <g id="layer-0" data-color="...">
+            <g id="layer-0-outlines">...</g>
+            <g id="layer-0-shading">...</g>
+            <g id="layer-0-decorations">...</g>
+        </g>
+        <g id="layer-1" data-color="...">...</g>
+    """
+    num_layers = len(grids)
+    if layer_colors is None:
+        layer_colors = ['red', 'black'][:num_layers]
 
-                # Draw diagonal on top — only clipped by neighbors
-                draw_diagonal_outline(d, diag_ch, xloc, yloc, occlusion_poly, stroke_width)
+    # All grids must be same dimensions
+    width = len(grids[0])
+    height = len(grids[0][0]) if width > 0 else 0
 
-            # Draw shading with clipping
-            if shading_style == 'directional-hatch':
-                params = shading_params if shading_params else DEFAULT_SHADING_PARAMS
-                light_dir = _normalize((math.cos(math.radians(light_angle_deg)),
-                                        math.sin(math.radians(light_angle_deg))))
-                pipe_poly = get_pipe_polygon(ch, xloc, yloc)
-                if pipe_poly:
-                    pipe_poly = pipe_poly.buffer(0)  # Clean geometry
+    canvas_w = width * 100
+    canvas_h = height * 100
+    d = draw.Drawing(canvas_w, canvas_h, origin='center', displayInline=False)
+    pad = max(stroke_width, shading_stroke_width) * 0.5 + 0.1
 
-                if ch in ('|', '-', 'i', '=', '!', '.'):
-                    # All tube types use same shading logic (with different polygons)
-                    draw_tube_directional_shading(d, ch, xloc, yloc, light_dir, shading_stroke_width, params,
-                                                  pipe_polygon=pipe_poly, occlusion_polygon=occlusion_poly)
-                elif ch in ('r', '7', 'j', 'L'):
-                    draw_corner_directional_shading(d, ch, xloc, yloc, light_dir, shading_stroke_width, params,
-                                                    pipe_polygon=pipe_poly, occlusion_polygon=occlusion_poly)
-                elif ch in ('nr', 'n7', 'nj', 'nL'):
-                    draw_sized_corner_directional_shading(d, ch, xloc, yloc, 12, light_dir, shading_stroke_width, params,
-                                                          pipe_polygon=pipe_poly, occlusion_polygon=occlusion_poly)
-                elif ch in ('tr', 't7', 'tj', 'tL'):
-                    draw_sized_corner_directional_shading(d, ch, xloc, yloc, 5, light_dir, shading_stroke_width, params,
-                                                          pipe_polygon=pipe_poly, occlusion_polygon=occlusion_poly)
-                elif ch in _DODGE_PARAMS:
-                    draw_dodge_directional_shading(d, ch, xloc, yloc, light_dir, shading_stroke_width, params,
-                                                    pipe_polygon=pipe_poly, occlusion_polygon=occlusion_poly)
-                elif ch in _CHAMFER_PARAMS:
-                    draw_chamfer_directional_shading(d, ch, xloc, yloc, light_dir, shading_stroke_width, params,
-                                                      pipe_polygon=pipe_poly, occlusion_polygon=occlusion_poly)
-                elif ch in _TEARDROP_PARAMS:
-                    draw_teardrop_directional_shading(d, ch, xloc, yloc, light_dir, shading_stroke_width, params,
-                                                       pipe_polygon=pipe_poly, occlusion_polygon=occlusion_poly)
-                elif ch in _DIAG_PARAMS:
-                    draw_diagonal_directional_shading(d, ch, xloc, yloc, light_dir, shading_stroke_width, params,
-                                                      pipe_polygon=pipe_poly, occlusion_polygon=occlusion_poly)
-                elif ch in _ADAPTER_PARAMS:
-                    draw_adapter_directional_shading(d, ch, xloc, yloc, light_dir, shading_stroke_width, params,
-                                                     pipe_polygon=pipe_poly, occlusion_polygon=occlusion_poly)
-                elif ch in _DIAG_CORNER_PARAMS:
-                    draw_diagonal_corner_directional_shading(d, ch, xloc, yloc, light_dir, shading_stroke_width, params,
-                                                              pipe_polygon=pipe_poly, occlusion_polygon=occlusion_poly)
-                elif ch in _DIAG_ENDCAP_PARAMS:
-                    draw_diagonal_endcap_directional_shading(d, ch, xloc, yloc, light_dir, shading_stroke_width, params,
-                                                              pipe_polygon=pipe_poly, occlusion_polygon=occlusion_poly)
-                elif ch in _ENDCAP_PARAMS:
-                    draw_endcap_directional_shading(d, ch, xloc, yloc, light_dir, shading_stroke_width, params,
-                                                    pipe_polygon=pipe_poly, occlusion_polygon=occlusion_poly)
-                elif ch in _MIXED_CORNER_PARAMS:
-                    draw_mixed_corner_directional_shading(d, ch, xloc, yloc, light_dir, shading_stroke_width, params,
-                                                          pipe_polygon=pipe_poly, occlusion_polygon=occlusion_poly)
-                elif ch in ('Rv', 'RV', 'Tv', 'TV', 'Rh', 'RH', 'Th', 'TH'):
-                    draw_reducer_directional_shading(d, ch, xloc, yloc, light_dir, shading_stroke_width, params,
-                                                     pipe_polygon=pipe_poly, occlusion_polygon=occlusion_poly)
-                elif ch in ('X', 'nX', 'tX'):
-                    hw = 30 if ch == 'X' else (12 if ch == 'nX' else 5)
-                    draw_cross_directional_shading(d, xloc, yloc, light_dir, shading_stroke_width, params,
-                                                   pipe_polygon=pipe_poly, occlusion_polygon=occlusion_poly,
-                                                   half_width=hw)
-                elif ch in ('T', 'B', 'E', 'W', 'nT', 'nB', 'nE', 'nW', 'tT', 'tB', 'tE', 'tW'):
-                    if ch in ('T', 'B', 'E', 'W'):
-                        hw = 30
-                        base_ch = ch
-                    elif ch.startswith('n'):
-                        hw = 12
-                        base_ch = ch[1:]
-                    else:
-                        hw = 5
-                        base_ch = ch[1:]
-                    draw_tee_directional_shading(d, base_ch, xloc, yloc, light_dir, shading_stroke_width, params,
-                                                 pipe_polygon=pipe_poly, occlusion_polygon=occlusion_poly,
-                                                 half_width=hw)
-                elif ch in CROSSOVER_TUBES:
-                    v_ch, h_ch = CROSSOVER_TUBES[ch]
-                    v_poly = get_tube_polygon(v_ch, xloc, yloc)
-                    h_poly = get_tube_polygon(h_ch, xloc, yloc)
-                    if v_poly:
-                        v_poly = v_poly.buffer(0)
-                    if h_poly:
-                        h_poly = h_poly.buffer(0)
+    # Phase 1: Precompute polygon caches for all layers
+    poly_caches = []
+    for layer_idx in range(num_layers):
+        grid = grids[layer_idx]
+        cache = {}
+        for x in range(width):
+            for y in range(height):
+                ch = grid[x][y]
+                xloc = (x - (width - 1) / 2.0) * 100
+                yloc = (y - (height - 1) / 2.0) * 100
+                poly = get_pipe_polygon(ch, xloc, yloc)
+                if poly is not None:
+                    poly = poly.buffer(0)
+                    if poly.is_valid and not poly.is_empty:
+                        cache[(x, y)] = poly
+        poly_caches.append(cache)
 
-                    h_occlusion = occlusion_poly
-                    if h_occlusion is not None and v_poly is not None:
-                        v_buffered = v_poly.buffer(pad, join_style=2)
-                        h_occlusion = h_occlusion.union(v_buffered)
-                    elif v_poly is not None:
-                        h_occlusion = v_poly.buffer(pad, join_style=2)
+    # Phase 2: Build full-layer union polygons for cross-layer occlusion
+    layer_unions = []
+    for layer_idx in range(num_layers):
+        layer_unions.append(_build_full_layer_union(poly_caches[layer_idx], pad=pad))
 
-                    draw_tube_directional_shading(d, h_ch, xloc, yloc, light_dir, shading_stroke_width, params,
-                                                  pipe_polygon=h_poly, occlusion_polygon=h_occlusion)
-                    draw_tube_directional_shading(d, v_ch, xloc, yloc, light_dir, shading_stroke_width, params,
-                                                  pipe_polygon=v_poly, occlusion_polygon=occlusion_poly)
+    # For layer i, extra occlusion = union of all layers ABOVE it (j > i)
+    extra_occlusions = [None] * num_layers
+    for layer_idx in range(num_layers):
+        above_polys = []
+        for j in range(layer_idx + 1, num_layers):
+            if layer_unions[j] is not None:
+                above_polys.append(layer_unions[j])
+        if len(above_polys) == 1:
+            extra_occlusions[layer_idx] = above_polys[0]
+        elif len(above_polys) > 1:
+            extra_occlusions[layer_idx] = unary_union(above_polys).buffer(0)
 
-                elif ch in DIAG_CROSSOVER_TUBES:
-                    tube_ch, diag_ch = DIAG_CROSSOVER_TUBES[ch]
-                    tube_poly = get_tube_polygon(tube_ch, xloc, yloc)
-                    diag_poly = get_diagonal_polygon(diag_ch, xloc, yloc)
-                    if tube_poly:
-                        tube_poly = tube_poly.buffer(0)
-                    if diag_poly:
-                        diag_poly = diag_poly.buffer(0)
+    # Phase 3: Render each layer into groups
+    total_tiles = width * height * num_layers
+    tiles_done = 0
 
-                    # Tube shading: clipped by diagonal (on top) + neighbors
-                    tube_occlusion = occlusion_poly
-                    if tube_occlusion is not None and diag_poly is not None:
-                        diag_buffered = diag_poly.buffer(pad, join_style=2)
-                        tube_occlusion = tube_occlusion.union(diag_buffered)
-                    elif diag_poly is not None:
-                        tube_occlusion = diag_poly.buffer(pad, join_style=2)
+    for layer_idx in range(num_layers):
+        grid = grids[layer_idx]
+        color = layer_colors[layer_idx] if layer_idx < len(layer_colors) else 'black'
 
-                    draw_tube_directional_shading(d, tube_ch, xloc, yloc, light_dir,
-                                                   shading_stroke_width, params,
-                                                   pipe_polygon=tube_poly,
-                                                   occlusion_polygon=tube_occlusion)
-                    draw_diagonal_directional_shading(d, diag_ch, xloc, yloc, light_dir,
-                                                       shading_stroke_width, params,
-                                                       pipe_polygon=diag_poly,
-                                                       occlusion_polygon=occlusion_poly)
+        # Create group hierarchy
+        layer_group = draw.Group(id='layer-{}'.format(layer_idx),
+                                 **{'data-color': color})
+        outlines_group = draw.Group(id='layer-{}-outlines'.format(layer_idx))
+        shading_group = draw.Group(id='layer-{}-shading'.format(layer_idx))
+        decorations_group = draw.Group(id='layer-{}-decorations'.format(layer_idx))
 
-            elif shading_style in ('accent', 'hatch', 'double-wall'):
-                # Draw other shading styles with clipping
-                if ch in ('|', '-'):
-                    draw_tube_shading_clipped(d, ch, xloc, yloc, shading_style, shading_stroke_width, occlusion_poly)
-                elif ch in ('r', '7', 'j', 'L'):
-                    draw_corner_shading_clipped(d, ch, xloc, yloc, shading_style, shading_stroke_width, occlusion_poly)
-                elif ch in CROSSOVER_TUBES:
-                    v_ch, h_ch = CROSSOVER_TUBES[ch]
-                    v_poly = get_tube_polygon(v_ch, xloc, yloc)
-                    if v_poly:
-                        v_poly = v_poly.buffer(pad, join_style=2)
+        _render_layer_to_group(
+            grid,
+            outlines_group, shading_group,
+            decorations_group if decorations_enabled else None,
+            poly_caches[layer_idx],
+            extra_occlusions[layer_idx],
+            stroke_width, shading_style, shading_stroke_width,
+            light_angle_deg=light_angle_deg, shading_params=shading_params,
+            decorations_enabled=decorations_enabled,
+            decoration_density=decoration_density,
+            decoration_stroke_width=decoration_stroke_width,
+            decoration_scale=decoration_scale,
+            progress_callback=progress_callback,
+            progress_offset=tiles_done,
+            progress_total=total_tiles,
+        )
+        tiles_done += width * height
 
-                    h_occlusion = occlusion_poly
-                    if h_occlusion is not None and v_poly is not None:
-                        h_occlusion = h_occlusion.union(v_poly)
-                    elif v_poly is not None:
-                        h_occlusion = v_poly
-
-                    draw_tube_shading_clipped(d, h_ch, xloc, yloc, shading_style, shading_stroke_width, h_occlusion)
-                    draw_tube_shading_clipped(d, v_ch, xloc, yloc, shading_style, shading_stroke_width, occlusion_poly)
-
-                elif ch in DIAG_CROSSOVER_TUBES:
-                    tube_ch, diag_ch = DIAG_CROSSOVER_TUBES[ch]
-                    diag_poly = get_diagonal_polygon(diag_ch, xloc, yloc)
-                    if diag_poly:
-                        diag_poly = diag_poly.buffer(pad, join_style=2)
-
-                    tube_occlusion = occlusion_poly
-                    if tube_occlusion is not None and diag_poly is not None:
-                        tube_occlusion = tube_occlusion.union(diag_poly)
-                    elif diag_poly is not None:
-                        tube_occlusion = diag_poly
-
-                    draw_tube_shading_clipped(d, tube_ch, xloc, yloc, shading_style,
-                                               shading_stroke_width, tube_occlusion)
-
-            tile_count += 1
-            if progress_callback:
-                progress_callback(tile_count, total_tiles)
-
-    # === PASS 3: DECORATIONS ===
-    if decorations_enabled:
-        deco_sw = decoration_stroke_width if decoration_stroke_width is not None else stroke_width
-        light_dir = _normalize((math.cos(math.radians(light_angle_deg)),
-                                math.sin(math.radians(light_angle_deg))))
-        decorated_tiles = select_decorated_tiles(grid, density=decoration_density)
-        deco_rng = random.Random(hash(str(grid)))
-
-        for (x, y), deco_type in decorated_tiles.items():
-            ch = grid[x][y]
-            xloc = (x - (width - 1) / 2.0) * 100
-            yloc = (y - (height - 1) / 2.0) * 100
-            pipe_poly = _poly_cache.get((x, y))
-            occlusion_poly = build_occlusion_polygon_cached(
-                _poly_cache, x, y, pad=pad)
-            draw_decoration(d, ch, xloc, yloc, deco_type, light_dir,
-                            pipe_poly, occlusion_poly, deco_sw, deco_rng,
-                            decoration_scale=decoration_scale)
+        # Assemble group hierarchy
+        layer_group.append(outlines_group)
+        layer_group.append(shading_group)
+        if decorations_enabled:
+            layer_group.append(decorations_group)
+        d.append(layer_group)
 
     return d.as_svg()
