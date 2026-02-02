@@ -7,6 +7,8 @@ from datetime import datetime
 st.set_page_config(page_title="Pipe Shading Preview", layout="wide")
 st.title("Pipe Shading Preview")
 
+view_mode = st.sidebar.radio("View Mode", ["Pipe Network", "Tile Catalog"])
+
 with st.sidebar:
     st.header("Shading Settings")
 
@@ -97,6 +99,14 @@ with st.sidebar:
                               help="Dead-end caps for cardinal pipes. Set > 0 to enable.")
         w_mixed_corner = st.slider("Mixed-Size Corners", 0.0, 5.0, 0.0, 0.1,
                                     help="Corners connecting medium and narrow pipes. Set > 0 to enable.")
+        w_sbend = st.slider("S-Bends", 0.0, 5.0, 0.0, 0.1,
+                             help="Smooth S-curves with lateral shift. Same ports as straights.")
+        w_segmented = st.slider("Segmented Elbows", 0.0, 5.0, 0.0, 0.1,
+                                 help="Faceted 90° corners (3 straight segments). Industrial look.")
+        w_long_radius = st.slider("Long-Radius Elbows", 0.0, 5.0, 0.0, 0.1,
+                                   help="Wide sweeping 90° corners with gentle arcs.")
+        w_vanishing = st.slider("Vanishing Pipes", 0.0, 5.0, 0.0, 0.1,
+                                 help="Pipes that taper to a point. Surreal dead-ends.")
 
     tile_weights = {
         'size': {'medium': w_medium, 'narrow': w_narrow, 'tiny': w_tiny},
@@ -105,7 +115,9 @@ with st.sidebar:
                   'dodge': w_dodge, 'diagonal': w_diagonal,
                   'diagonal_endcap': w_diag_endcap,
                   'junction': w_junction, 'reducer': w_reducer,
-                  'endcap': w_endcap, 'mixed_corner': w_mixed_corner},
+                  'endcap': w_endcap, 'mixed_corner': w_mixed_corner,
+                  'sbend': w_sbend, 'segmented': w_segmented,
+                  'long_radius': w_long_radius, 'vanishing': w_vanishing},
     }
 
     st.header("Grid Settings")
@@ -161,132 +173,178 @@ with st.sidebar:
         st.session_state.pop('svg_string', None)
         st.session_state.pop('render_key', None)
 
-# Generate grid(s) if needed
-current_dims = (grid_width, grid_height, multilayer_enabled)
+if view_mode == "Pipe Network":
+    # Generate grid(s) if needed
+    current_dims = (grid_width, grid_height, multilayer_enabled)
 
-def _run_wfc(progress_label="", progress_scale=1.0, progress_offset=0.0, stripe_offset=0):
-    """Run WFC with progress callback."""
-    def wfc_update(attempt, max_attempts, cells, total, backtracks=0):
-        pct = progress_offset + min(cells / total, 1.0) * progress_scale
-        bt_text = " ({} backtracks)".format(backtracks) if backtracks else ""
-        wfc_progress.progress(min(pct, 1.0),
-                              text="{} Attempt {} — {}/{} cells{}".format(
-                                  progress_label, attempt, cells, total, bt_text))
+    def _run_wfc(progress_label="", progress_scale=1.0, progress_offset=0.0, stripe_offset=0):
+        """Run WFC with progress callback."""
+        def wfc_update(attempt, max_attempts, cells, total, backtracks=0):
+            pct = progress_offset + min(cells / total, 1.0) * progress_scale
+            bt_text = " ({} backtracks)".format(backtracks) if backtracks else ""
+            wfc_progress.progress(min(pct, 1.0),
+                                  text="{} Attempt {} — {}/{} cells{}".format(
+                                      progress_label, attempt, cells, total, bt_text))
 
-    if grid_width > 16:
-        return pipe_core.wave_function_collapse_striped(
-            grid_width, grid_height, stripe_width=stripe_width,
-            tile_weights=tile_weights, progress_callback=wfc_update,
-            stripe_offset=stripe_offset)
-    else:
-        return pipe_core.wave_function_collapse(
-            grid_width, grid_height, tile_weights=tile_weights,
-            progress_callback=wfc_update)
-
-if 'grid' not in st.session_state or st.session_state.get('grid_dims') != current_dims:
-    # New grid means cached SVG is stale
-    st.session_state.pop('svg_string', None)
-    st.session_state.pop('render_key', None)
-    st.session_state.pop('grids', None)
-    wfc_progress = st.progress(0, text="Generating pipe layout...")
-
-    if multilayer_enabled:
-        grid_0 = _run_wfc("Layer 1/2 —", progress_scale=0.5, progress_offset=0.0)
-        grid_1 = _run_wfc("Layer 2/2 —", progress_scale=0.5, progress_offset=0.5,
-                           stripe_offset=stripe_width // 2)
-        wfc_progress.empty()
-        if grid_0 and grid_1:
-            st.session_state.grids = [grid_0, grid_1]
-            st.session_state.grid = grid_0
+        if grid_width > 16:
+            return pipe_core.wave_function_collapse_striped(
+                grid_width, grid_height, stripe_width=stripe_width,
+                tile_weights=tile_weights, progress_callback=wfc_update,
+                stripe_offset=stripe_offset)
         else:
-            st.session_state.grids = None
-            st.session_state.grid = None
-    else:
-        grid = _run_wfc(progress_scale=1.0)
-        wfc_progress.empty()
-        st.session_state.grid = grid
-        st.session_state.grids = None
-    st.session_state.grid_dims = current_dims
+            return pipe_core.wave_function_collapse(
+                grid_width, grid_height, tile_weights=tile_weights,
+                progress_callback=wfc_update)
 
-# Determine if we have valid data to render
-has_grid = False
-if multilayer_enabled:
-    grids = st.session_state.get('grids')
-    has_grid = grids is not None and len(grids) == 2
-else:
-    grid = st.session_state.get('grid')
-    has_grid = grid is not None
-
-if has_grid:
-    # Cache rendered SVG to avoid re-rendering when only view settings change
-    render_key = (stroke_width, shading_style, shading_stroke_width,
-                  light_angle, str(shading_params),
-                  decorations_enabled, decoration_density, decoration_stroke_width,
-                  decoration_scale,
-                  multilayer_enabled, layer_0_color, layer_1_color)
-
-    if st.session_state.get('render_key') != render_key or 'svg_string' not in st.session_state:
-        progress_bar = st.progress(0, text="Rendering tiles...")
-
-        def update_progress(current, total):
-            progress_bar.progress(current / total, text="Rendering tile {} / {}".format(current, total))
+    if 'grid' not in st.session_state or st.session_state.get('grid_dims') != current_dims:
+        # New grid means cached SVG is stale
+        st.session_state.pop('svg_string', None)
+        st.session_state.pop('render_key', None)
+        st.session_state.pop('grids', None)
+        wfc_progress = st.progress(0, text="Generating pipe layout...")
 
         if multilayer_enabled:
-            svg_string = pipe_core.render_multilayer_svg(
-                st.session_state.grids,
-                stroke_width, shading_style, shading_stroke_width,
-                light_angle_deg=light_angle, shading_params=shading_params,
-                progress_callback=update_progress,
-                decorations_enabled=decorations_enabled,
-                decoration_density=decoration_density,
-                decoration_stroke_width=decoration_stroke_width,
-                decoration_scale=decoration_scale,
-                layer_colors=[layer_0_color, layer_1_color],
-            )
+            grid_0 = _run_wfc("Layer 1/2 —", progress_scale=0.5, progress_offset=0.0)
+            grid_1 = _run_wfc("Layer 2/2 —", progress_scale=0.5, progress_offset=0.5,
+                               stripe_offset=stripe_width // 2)
+            wfc_progress.empty()
+            if grid_0 and grid_1:
+                st.session_state.grids = [grid_0, grid_1]
+                st.session_state.grid = grid_0
+            else:
+                st.session_state.grids = None
+                st.session_state.grid = None
         else:
-            svg_string = pipe_core.render_svg(
-                st.session_state.grid,
-                stroke_width, shading_style, shading_stroke_width,
-                light_angle_deg=light_angle, shading_params=shading_params,
-                progress_callback=update_progress,
-                decorations_enabled=decorations_enabled,
-                decoration_density=decoration_density,
-                decoration_stroke_width=decoration_stroke_width,
-                decoration_scale=decoration_scale,
-            )
-        progress_bar.empty()
-        st.session_state.svg_string = svg_string
-        st.session_state.render_key = render_key
+            grid = _run_wfc(progress_scale=1.0)
+            wfc_progress.empty()
+            st.session_state.grid = grid
+            st.session_state.grids = None
+        st.session_state.grid_dims = current_dims
+
+    # Determine if we have valid data to render
+    has_grid = False
+    if multilayer_enabled:
+        grids = st.session_state.get('grids')
+        has_grid = grids is not None and len(grids) == 2
     else:
-        svg_string = st.session_state.svg_string
+        grid = st.session_state.get('grid')
+        has_grid = grid is not None
 
-    # Make SVG responsive for display
-    display_svg = re.sub(r'width="\d+"', 'width="100%"', svg_string, count=1)
-    display_svg = re.sub(r'height="\d+"', 'height="100%"', display_svg, count=1)
+    if has_grid:
+        # Cache rendered SVG to avoid re-rendering when only view settings change
+        render_key = (stroke_width, shading_style, shading_stroke_width,
+                      light_angle, str(shading_params),
+                      decorations_enabled, decoration_density, decoration_stroke_width,
+                      decoration_scale,
+                      multilayer_enabled, layer_0_color, layer_1_color)
 
-    # Zoom via CSS transform (no re-render needed)
-    scale = zoom_level / 100.0
+        if st.session_state.get('render_key') != render_key or 'svg_string' not in st.session_state:
+            progress_bar = st.progress(0, text="Rendering tiles...")
 
-    html_content = f'''
-    <div style="background:#f0f0f0; height:100%; overflow:auto; padding:20px; box-sizing:border-box;">
-        <div style="transform-origin:top center; transform:scale({scale});
-                    display:inline-block; background:white; padding:10px;
-                    box-shadow: 0 2px 8px rgba(0,0,0,0.1);
-                    margin: 0 auto; display:block; width:fit-content;">
-            <div style="width:80vmin; height:80vmin;">
-                {display_svg}
+            def update_progress(current, total):
+                progress_bar.progress(current / total, text="Rendering tile {} / {}".format(current, total))
+
+            if multilayer_enabled:
+                svg_string = pipe_core.render_multilayer_svg(
+                    st.session_state.grids,
+                    stroke_width, shading_style, shading_stroke_width,
+                    light_angle_deg=light_angle, shading_params=shading_params,
+                    progress_callback=update_progress,
+                    decorations_enabled=decorations_enabled,
+                    decoration_density=decoration_density,
+                    decoration_stroke_width=decoration_stroke_width,
+                    decoration_scale=decoration_scale,
+                    layer_colors=[layer_0_color, layer_1_color],
+                )
+            else:
+                svg_string = pipe_core.render_svg(
+                    st.session_state.grid,
+                    stroke_width, shading_style, shading_stroke_width,
+                    light_angle_deg=light_angle, shading_params=shading_params,
+                    progress_callback=update_progress,
+                    decorations_enabled=decorations_enabled,
+                    decoration_density=decoration_density,
+                    decoration_stroke_width=decoration_stroke_width,
+                    decoration_scale=decoration_scale,
+                )
+            progress_bar.empty()
+            st.session_state.svg_string = svg_string
+            st.session_state.render_key = render_key
+        else:
+            svg_string = st.session_state.svg_string
+
+        # Make SVG responsive for display
+        display_svg = re.sub(r'width="\d+"', 'width="100%"', svg_string, count=1)
+        display_svg = re.sub(r'height="\d+"', 'height="100%"', display_svg, count=1)
+
+        # Zoom via CSS transform (no re-render needed)
+        scale = zoom_level / 100.0
+
+        html_content = f'''
+        <div style="background:#f0f0f0; height:100%; overflow:auto; padding:20px; box-sizing:border-box;">
+            <div style="transform-origin:top center; transform:scale({scale});
+                        display:inline-block; background:white; padding:10px;
+                        box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+                        margin: 0 auto; display:block; width:fit-content;">
+                <div style="width:80vmin; height:80vmin;">
+                    {display_svg}
+                </div>
             </div>
         </div>
-    </div>
-    '''
-    components.html(html_content, height=900, scrolling=True)
+        '''
+        components.html(html_content, height=900, scrolling=True)
 
-    timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
-    st.download_button(
-        "Download SVG",
-        svg_string,
-        file_name="pipes-{}.svg".format(timestamp),
-        mime="image/svg+xml"
-    )
-else:
-    st.error("Failed to generate grid. Click 'Regenerate Layout' to try again.")
+        timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+        st.download_button(
+            "Download SVG",
+            svg_string,
+            file_name="pipes-{}.svg".format(timestamp),
+            mime="image/svg+xml"
+        )
+    else:
+        st.error("Failed to generate grid. Click 'Regenerate Layout' to try again.")
+
+elif view_mode == "Tile Catalog":
+    st.subheader("Tile Catalog")
+
+    sizes = ['medium', 'narrow', 'tiny']
+
+    # Build HTML table of all representative tiles
+    html_parts = [
+        '<table style="border-collapse:collapse; background:#f8f8f8; font-family:sans-serif;">',
+        '<tr style="border-bottom:2px solid #ccc;">',
+        '<th style="padding:8px 12px; text-align:left;">Shape</th>',
+    ]
+    for size in sizes:
+        html_parts.append('<th style="padding:8px 12px; text-align:center;">{}</th>'.format(size))
+    html_parts.append('</tr>')
+
+    for shape_name, size_chars in pipe_core.CATALOG_TILES:
+        html_parts.append('<tr style="border-bottom:1px solid #e0e0e0;">')
+        html_parts.append(
+            '<td style="padding:6px 12px; font-weight:bold; vertical-align:middle;'
+            ' white-space:nowrap;">{}</td>'.format(shape_name))
+        for size in sizes:
+            ch = size_chars.get(size)
+            if ch:
+                svg_str = pipe_core.render_single_tile(
+                    ch, stroke_width, shading_style, shading_stroke_width,
+                    light_angle_deg=light_angle, shading_params=shading_params)
+                # Strip XML declaration for inline embedding
+                svg_str = re.sub(r'<\?xml[^?]*\?>\s*', '', svg_str)
+                # Set display size
+                svg_str = re.sub(r'width="\d+"', 'width="120"', svg_str, count=1)
+                svg_str = re.sub(r'height="\d+"', 'height="120"', svg_str, count=1)
+                label = '<div style="text-align:center; font-size:11px; color:#666; font-family:monospace;">{}</div>'.format(ch)
+                html_parts.append(
+                    '<td style="padding:4px 8px; text-align:center; vertical-align:middle;">'
+                    '{}{}</td>'.format(svg_str, label))
+            else:
+                html_parts.append(
+                    '<td style="padding:4px 8px; text-align:center; vertical-align:middle;'
+                    ' color:#ccc;">&mdash;</td>')
+        html_parts.append('</tr>')
+    html_parts.append('</table>')
+
+    catalog_html = '\n'.join(html_parts)
+    components.html(catalog_html, height=2400, scrolling=True)
