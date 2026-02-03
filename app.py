@@ -346,27 +346,70 @@ with st.sidebar:
                                        help="data-color attribute for pen plotter")
         layer_1_color = st.text_input("Top Layer Color", value="black",
                                        help="data-color attribute for pen plotter")
-        scaled_layers_enabled = st.checkbox("Enable Per-Layer Scaling", value=False,
-                                             help="Scale layers independently for depth effect")
-        if scaled_layers_enabled:
+
+        scale_mode = st.radio(
+            "Layer Scale Mode",
+            ["Same Dimensions", "Manual Scaling", "Density-Preserving"],
+            index=0,
+            help="Same: both layers use grid dimensions. "
+                 "Manual: set scale per layer. "
+                 "Density-Preserving: different grid sizes, auto-computed scale."
+        )
+
+        density_preserving_enabled = (scale_mode == "Density-Preserving")
+        scaled_layers_enabled = (scale_mode in ["Manual Scaling", "Density-Preserving"])
+
+        if scale_mode == "Manual Scaling":
             layer_0_scale = st.slider("Bottom Layer Scale", 0.5, 2.0, 1.0, 0.05)
             layer_1_scale = st.slider("Top Layer Scale", 0.5, 2.0, 1.2, 0.05)
+            layer_0_width, layer_0_height = grid_width, grid_height
+            layer_1_width, layer_1_height = grid_width, grid_height
+
+        elif scale_mode == "Density-Preserving":
+            st.caption("Top layer (reference) uses main grid dimensions.")
+            st.caption("Bottom layer density controls cell count; scale auto-computed.")
+
+            layer_1_width, layer_1_height = grid_width, grid_height
+            layer_1_scale = 1.0
+
+            with st.expander("Bottom Layer Density", expanded=True):
+                density_ratio = st.slider(
+                    "Density Ratio", 0.5, 2.0, 1.5, 0.1,
+                    help="1.0 = same density. >1.0 = more cells (denser). <1.0 = fewer cells."
+                )
+                layer_0_width = max(4, int(grid_width * density_ratio))
+                layer_0_height = max(4, int(grid_height * density_ratio))
+                st.caption("Bottom layer: {} x {} cells".format(
+                    layer_0_width, layer_0_height))
+
+                layer_0_scale = pipe_core.compute_density_preserving_scale(
+                    grid_width, grid_height, layer_0_width, layer_0_height
+                )
+                st.caption("Auto-computed scale: {:.3f}".format(layer_0_scale))
+        else:
+            # Same Dimensions mode
+            layer_0_scale = 1.0
+            layer_1_scale = 1.0
+            layer_0_width, layer_0_height = grid_width, grid_height
+            layer_1_width, layer_1_height = grid_width, grid_height
+
+        if scaled_layers_enabled:
             with st.expander("Layer Offsets"):
                 layer_0_offset_x = st.slider("Bottom X Offset", -200, 200, 0, 10)
                 layer_0_offset_y = st.slider("Bottom Y Offset", -200, 200, 0, 10)
                 layer_1_offset_x = st.slider("Top X Offset", -200, 200, 0, 10)
                 layer_1_offset_y = st.slider("Top Y Offset", -200, 200, 0, 10)
         else:
-            layer_0_scale = 1.0
-            layer_1_scale = 1.0
             layer_0_offset_x = layer_0_offset_y = 0
             layer_1_offset_x = layer_1_offset_y = 0
     else:
         layer_0_color = "red"
         layer_1_color = "black"
+        density_preserving_enabled = False
         scaled_layers_enabled = False
-        layer_0_scale = 1.0
-        layer_1_scale = 1.0
+        layer_0_scale = layer_1_scale = 1.0
+        layer_0_width = layer_1_width = grid_width
+        layer_0_height = layer_1_height = grid_height
         layer_0_offset_x = layer_0_offset_y = 0
         layer_1_offset_x = layer_1_offset_y = 0
 
@@ -412,8 +455,14 @@ if view_mode == "Pipe Network":
         mask_key = (tuple(tuple(sorted(s.items())) for s in mask_shapes),
                     mask_invert)
     spatial_key = str(spatial_map) if spatial_map else None
+    if density_preserving_enabled:
+        per_layer_dims = (layer_0_width, layer_0_height,
+                          layer_1_width, layer_1_height)
+    else:
+        per_layer_dims = None
     current_dims = (grid_width, grid_height, multilayer_enabled,
-                    mask_enabled, mask_key, spatial_key)
+                    mask_enabled, mask_key, spatial_key,
+                    density_preserving_enabled, per_layer_dims)
 
     def _run_wfc(progress_label="", progress_scale=1.0, progress_offset=0.0, stripe_offset=0):
         """Run WFC with progress callback."""
@@ -436,6 +485,35 @@ if view_mode == "Pipe Network":
                 progress_callback=wfc_update, mask=wfc_mask,
                 spatial_map=spatial_map)
 
+    def _run_wfc_with_dims(w, h, progress_label="", progress_scale=1.0,
+                           progress_offset=0.0, stripe_offset=0):
+        """Run WFC with specific dimensions (for density-preserving layers)."""
+        def wfc_update(attempt, max_attempts, cells, total, backtracks=0):
+            pct = progress_offset + min(cells / total, 1.0) * progress_scale
+            bt_text = " ({} backtracks)".format(backtracks) if backtracks else ""
+            wfc_progress.progress(min(pct, 1.0),
+                                  text="{} Attempt {} — {}/{} cells{}".format(
+                                      progress_label, attempt, cells, total, bt_text))
+
+        # Scale mask to layer dimensions if mask enabled
+        layer_mask = None
+        if wfc_mask is not None:
+            layer_mask = pipe_core.scale_mask(wfc_mask,
+                                               grid_width, grid_height,
+                                               w, h)
+
+        if w > 16:
+            return pipe_core.wave_function_collapse_striped(
+                w, h, stripe_width=stripe_width,
+                tile_weights=tile_weights, progress_callback=wfc_update,
+                stripe_offset=stripe_offset, mask=layer_mask,
+                spatial_map=spatial_map)
+        else:
+            return pipe_core.wave_function_collapse(
+                w, h, tile_weights=tile_weights,
+                progress_callback=wfc_update, mask=layer_mask,
+                spatial_map=spatial_map)
+
     if 'grid' not in st.session_state or st.session_state.get('grid_dims') != current_dims:
         # New grid means cached SVG is stale
         st.session_state.pop('svg_string', None)
@@ -444,9 +522,22 @@ if view_mode == "Pipe Network":
         wfc_progress = st.progress(0, text="Generating pipe layout...")
 
         if multilayer_enabled:
-            grid_0 = _run_wfc("Layer 1/2 —", progress_scale=0.5, progress_offset=0.0)
-            grid_1 = _run_wfc("Layer 2/2 —", progress_scale=0.5, progress_offset=0.5,
-                               stripe_offset=stripe_width // 2)
+            if density_preserving_enabled:
+                # Generate grids with per-layer dimensions
+                grid_0 = _run_wfc_with_dims(
+                    layer_0_width, layer_0_height,
+                    "Layer 1/2 ({}x{}) —".format(layer_0_width, layer_0_height),
+                    progress_scale=0.5, progress_offset=0.0)
+                grid_1 = _run_wfc_with_dims(
+                    layer_1_width, layer_1_height,
+                    "Layer 2/2 ({}x{}) —".format(layer_1_width, layer_1_height),
+                    progress_scale=0.5, progress_offset=0.5,
+                    stripe_offset=stripe_width // 2)
+            else:
+                # Same dimensions for both layers
+                grid_0 = _run_wfc("Layer 1/2 —", progress_scale=0.5, progress_offset=0.0)
+                grid_1 = _run_wfc("Layer 2/2 —", progress_scale=0.5, progress_offset=0.5,
+                                   stripe_offset=stripe_width // 2)
             wfc_progress.empty()
             if grid_0 and grid_1:
                 st.session_state.grids = [grid_0, grid_1]
@@ -479,7 +570,10 @@ if view_mode == "Pipe Network":
                       multilayer_enabled, layer_0_color, layer_1_color,
                       scaled_layers_enabled, layer_0_scale, layer_1_scale,
                       layer_0_offset_x, layer_0_offset_y,
-                      layer_1_offset_x, layer_1_offset_y)
+                      layer_1_offset_x, layer_1_offset_y,
+                      density_preserving_enabled,
+                      layer_0_width, layer_0_height,
+                      layer_1_width, layer_1_height)
 
         if st.session_state.get('render_key') != render_key or 'svg_string' not in st.session_state:
             progress_bar = st.progress(0, text="Rendering tiles...")
@@ -489,12 +583,15 @@ if view_mode == "Pipe Network":
 
             if multilayer_enabled and scaled_layers_enabled:
                 layer_specs = []
-                for idx, (g, color, scale, offset) in enumerate([
+                layer_configs = [
                     (st.session_state.grids[0], layer_0_color, layer_0_scale,
-                     (layer_0_offset_x, layer_0_offset_y)),
+                     (layer_0_offset_x, layer_0_offset_y),
+                     layer_0_width, layer_0_height),
                     (st.session_state.grids[1], layer_1_color, layer_1_scale,
-                     (layer_1_offset_x, layer_1_offset_y)),
-                ]):
+                     (layer_1_offset_x, layer_1_offset_y),
+                     layer_1_width, layer_1_height),
+                ]
+                for idx, (g, color, scale, offset, w, h) in enumerate(layer_configs):
                     layer_specs.append(pipe_core.make_layer_spec(
                         grid=g, scale=scale, offset=offset,
                         stroke_width=stroke_width,
@@ -507,6 +604,8 @@ if view_mode == "Pipe Network":
                         decoration_scale=decoration_scale,
                         name='layer-{}'.format(idx),
                         color=color,
+                        grid_width=w,
+                        grid_height=h,
                     ))
                 svg_string = pipe_core.render_scaled_multilayer_svg(
                     layer_specs,

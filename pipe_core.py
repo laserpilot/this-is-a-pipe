@@ -16,8 +16,12 @@ def make_layer_spec(grid, scale=1.0, offset=(0, 0),
                     shading_stroke_width=0.3, shading_params=None,
                     decorations_enabled=False, decoration_density=0.10,
                     decoration_stroke_width=None, decoration_scale=1.0,
-                    name=None, color='black'):
-    """Create a LayerSpec dict with all per-layer rendering parameters."""
+                    name=None, color='black',
+                    grid_width=None, grid_height=None):
+    """Create a LayerSpec dict with all per-layer rendering parameters.
+
+    grid_width/grid_height: optional, for density-preserving mode reference.
+    """
     return {
         'grid': grid,
         'scale': scale,
@@ -32,7 +36,24 @@ def make_layer_spec(grid, scale=1.0, offset=(0, 0),
         'decoration_scale': decoration_scale,
         'name': name,
         'color': color,
+        'grid_width': grid_width,
+        'grid_height': grid_height,
     }
+
+
+def compute_density_preserving_scale(base_width, base_height,
+                                      layer_width, layer_height):
+    """Compute scale to fit layer_dims into base_dims footprint.
+
+    Returns scale such that layer at layer_dims fits the same world
+    footprint as base_dims. Uses minimum of x/y ratios to ensure
+    the layer fits entirely.
+    """
+    if layer_width <= 0 or layer_height <= 0:
+        return 1.0
+    scale_x = base_width / layer_width
+    scale_y = base_height / layer_height
+    return min(scale_x, scale_y)
 
 
 def _poly_local_to_world(poly, scale, offset):
@@ -3616,6 +3637,42 @@ def count_masked_cells(mask):
     blocked = sum(1 for col in mask for cell in col if not cell)
     total = len(mask) * len(mask[0]) if mask else 0
     return (total - blocked, blocked)
+
+
+def scale_mask(mask, src_width, src_height, dst_width, dst_height):
+    """Scale a mask from source dimensions to destination dimensions.
+
+    Uses nearest-neighbor sampling to preserve mask shape at different
+    resolutions. Used for density-preserving layers where each layer
+    may have different grid dimensions.
+
+    Args:
+        mask: 2D boolean grid [x][y] where True=allowed, False=blocked
+        src_width, src_height: original mask dimensions
+        dst_width, dst_height: target dimensions
+
+    Returns:
+        New mask with target dimensions, or None if input is None.
+    """
+    if mask is None:
+        return None
+
+    if src_width == dst_width and src_height == dst_height:
+        return mask
+
+    new_mask = [[True for _ in range(dst_height)] for _ in range(dst_width)]
+
+    for x in range(dst_width):
+        for y in range(dst_height):
+            # Map to source coordinates (normalized)
+            src_x = int((x / dst_width) * src_width)
+            src_y = int((y / dst_height) * src_height)
+            # Clamp to valid range
+            src_x = min(src_x, src_width - 1)
+            src_y = min(src_y, src_height - 1)
+            new_mask[x][y] = mask[src_x][src_y]
+
+    return new_mask
 
 
 # ============================================================================
