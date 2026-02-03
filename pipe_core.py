@@ -1949,6 +1949,9 @@ def get_tee_polygon(ch, xloc, yloc, half_width=30):
 
 def get_pipe_polygon(ch, xloc, yloc):
     """Return Shapely Polygon for any pipe segment."""
+    if ch == VOID_CHAR:
+        return None
+
     # Standard tubes (medium, narrow, tiny)
     if ch in ('|', '-', 'i', '=', '!', '.'):
         return get_tube_polygon(ch, xloc, yloc)
@@ -2958,7 +2961,10 @@ OPPOSITE = {
     'NE': 'SW', 'SW': 'NE', 'NW': 'SE', 'SE': 'NW',
 }
 
+VOID_CHAR = '\x00'  # Void tile — no ports, no geometry, not rendered
+
 PORTS = {
+    VOID_CHAR: {},  # Void — masked cell, no ports in any direction
     # Medium-width pipes (current default, ±30 walls)
     'r': {'S': 'm', 'E': 'm'},
     '7': {'S': 'm', 'W': 'm'},
@@ -3140,36 +3146,41 @@ PORTS = {
     'xVd': {'N': 'm', 'S': 'm', 'NW': 'n', 'SE': 'n'},
 }
 
-ALL_CHARS = set(PORTS.keys())
+_ALL_WITH_VOID = set(PORTS.keys())
 
 # Backward compatibility: OPENINGS as set of directions (for code that only needs presence)
 OPENINGS = {ch: set(ports.keys()) for ch, ports in PORTS.items()}
 
 # Precomputed compatibility table: COMPAT_TABLE[ch][direction] = frozenset of compatible tiles
 # Built once at module load; replaces O(106)-per-call iteration in get_compatible_neighbors
+# Includes VOID_CHAR so propagation works when masked cells are present.
 COMPAT_TABLE = {}
-for _ch in ALL_CHARS:
+for _ch in _ALL_WITH_VOID:
     COMPAT_TABLE[_ch] = {}
     for _dir in DIRECTION_OFFSETS:
         _opp = OPPOSITE[_dir]
         _port = PORTS.get(_ch, {}).get(_dir)
         COMPAT_TABLE[_ch][_dir] = frozenset(
-            c for c in ALL_CHARS if PORTS.get(c, {}).get(_opp) == _port
+            c for c in _ALL_WITH_VOID if PORTS.get(c, {}).get(_opp) == _port
         )
 
 # Precomputed edge-constraint sets: tiles with NO opening in each direction
+# Includes VOID_CHAR so boundary constraints work for masked cells.
 _NO_OPENING = {}
 for _dir in DIRECTION_OFFSETS:
     _NO_OPENING[_dir] = frozenset(
-        ch for ch in ALL_CHARS if _dir not in PORTS.get(ch, {})
+        ch for ch in _ALL_WITH_VOID if _dir not in PORTS.get(ch, {})
     )
 
 # Precomputed sets: tiles that HAVE an opening in each direction
 _HAS_OPENING = {}
 for _dir in DIRECTION_OFFSETS:
     _HAS_OPENING[_dir] = frozenset(
-        ch for ch in ALL_CHARS if _dir in PORTS.get(ch, {})
+        ch for ch in _ALL_WITH_VOID if _dir in PORTS.get(ch, {})
     )
+
+# ALL_CHARS excludes VOID_CHAR — void tiles only appear via explicit mask assignment
+ALL_CHARS = _ALL_WITH_VOID - {VOID_CHAR}
 
 # Tile category mappings for weight system
 TILE_SIZE = {}
@@ -3250,6 +3261,8 @@ for _ch in _VANISHING_PARAMS:
     TILE_SHAPE[_ch] = 'vanishing'
 for _ch in _MIXED_CORNER_PARAMS:
     TILE_SHAPE[_ch] = 'mixed_corner'
+TILE_SIZE[VOID_CHAR] = 'void'
+TILE_SHAPE[VOID_CHAR] = 'void'
 
 # Representative tiles for catalog/debug view: (display_name, {size: tile_char})
 CATALOG_TILES = [
@@ -3299,8 +3312,37 @@ DIAG_CROSSOVER_TUBES = {
 }
 
 
+def _ensure_endcaps_for_mask(tile_weights):
+    """Return tile_weights with endcaps/vanishing enabled (needed for mask boundaries)."""
+    if tile_weights is None:
+        tile_weights = {
+            'size': {'medium': 1.0, 'narrow': 1.0, 'tiny': 1.0},
+            'shape': {
+                'straight': 1.0, 'corner': 3.0, 'junction': 2.0,
+                'reducer': 1.0, 'dodge': 0.0, 'diagonal': 0.0,
+                'diagonal_endcap': 0.0, 'mixed_corner': 0.0,
+                'sbend': 0.0, 'segmented': 0.0, 'long_radius': 0.0,
+                'chamfer': 0.0, 'teardrop': 0.0,
+                'endcap': 0.5, 'vanishing': 0.5,
+            },
+        }
+    else:
+        tw = {
+            'size': dict(tile_weights.get('size', {})),
+            'shape': dict(tile_weights.get('shape', {})),
+        }
+        if tw['shape'].get('endcap', 0) <= 0:
+            tw['shape']['endcap'] = 0.5
+        if tw['shape'].get('vanishing', 0) <= 0:
+            tw['shape']['vanishing'] = 0.5
+        tile_weights = tw
+    return tile_weights
+
+
 def get_tile_weight(ch, tile_weights):
     """Calculate tile weight from size and shape multipliers."""
+    if ch == VOID_CHAR:
+        return 0  # Void tiles are never chosen by WFC
     if tile_weights is None:
         shape = TILE_SHAPE.get(ch)
         if shape in ('diagonal', 'diagonal_endcap', 'endcap', 'mixed_corner',
@@ -3329,6 +3371,60 @@ def get_tile_weight(ch, tile_weights):
     h = shape_weights.get(shape_cat, 1.0)
 
     return s * h
+
+
+def _lerp_size_weight(base_size, t, spatial_map):
+    """Linearly interpolate between start and end weight for a base size."""
+    cfg = spatial_map.get(base_size, {'start': 1.0, 'end': 1.0})
+    start = cfg.get('start', 1.0)
+    end = cfg.get('end', 1.0)
+    return start + (end - start) * t
+
+
+def compute_spatial_size_weight(size_cat, x, y, global_width, global_height,
+                                spatial_map):
+    """Compute spatial weight multiplier for a size category at grid position.
+
+    Returns a float >= spatial_map['min_weight']. Returns 1.0 if spatial_map is
+    None or disabled.
+    """
+    if spatial_map is None or not spatial_map.get('enabled', False):
+        return 1.0
+
+    map_type = spatial_map.get('type', 'horizontal')
+    min_w = spatial_map.get('min_weight', 0.05)
+
+    # Compute normalized parameter t in [0, 1]
+    if map_type == 'horizontal':
+        t = x / max(global_width - 1, 1)
+    elif map_type == 'vertical':
+        t = y / max(global_height - 1, 1)
+    elif map_type == 'radial':
+        cx = (global_width - 1) / 2.0
+        cy = (global_height - 1) / 2.0
+        max_r = math.sqrt(cx * cx + cy * cy)
+        if max_r < 1e-6:
+            t = 0.0
+        else:
+            t = math.sqrt((x - cx) ** 2 + (y - cy) ** 2) / max_r
+        t = min(t, 1.0)
+    else:
+        return 1.0
+
+    # For composite size categories, average the constituent sizes
+    if size_cat == 'reducer_mn':
+        w = (_lerp_size_weight('medium', t, spatial_map)
+             + _lerp_size_weight('narrow', t, spatial_map)) / 2.0
+    elif size_cat == 'reducer_nt':
+        w = (_lerp_size_weight('narrow', t, spatial_map)
+             + _lerp_size_weight('tiny', t, spatial_map)) / 2.0
+    elif size_cat == 'crossover_mt':
+        w = (_lerp_size_weight('medium', t, spatial_map)
+             + _lerp_size_weight('tiny', t, spatial_map)) / 2.0
+    else:
+        w = _lerp_size_weight(size_cat, t, spatial_map)
+
+    return max(w, min_w)
 
 
 def get_port_size(ch, direction):
@@ -3448,6 +3544,83 @@ def remove_tight_circle_possibilities(poss_grid, width, height):
                     any_changes = True
     return any_changes
 
+
+# ============================================================================
+# MASKING SYSTEM
+# ============================================================================
+
+def build_mask(width, height, shapes, invert=False):
+    """Build a boolean mask grid from shape primitives.
+
+    Each shape 'selects' cells. Multiple shapes are unioned.
+    - invert=False: selected cells are BLOCKED (voids). Pipes grow elsewhere.
+    - invert=True:  selected cells are ALLOWED. Everything else is void.
+
+    Args:
+        width, height: Grid dimensions.
+        shapes: list of dicts, each with 'type' and shape-specific keys:
+            rectangle: x0, y0, x1, y1  (start inclusive, end exclusive)
+            circle:    cx, cy, r
+            ring:      cx, cy, r_inner, r_outer
+        invert: flip the mask after applying shapes.
+
+    Returns:
+        mask[x][y]: True = allowed, False = blocked.
+    """
+    # Start: all cells unselected
+    selected = [[False for _ in range(height)] for _ in range(width)]
+
+    for shape in shapes:
+        stype = shape['type']
+        if stype == 'rectangle':
+            x0 = max(0, int(shape['x0']))
+            y0 = max(0, int(shape['y0']))
+            x1 = min(width, int(shape['x1']))
+            y1 = min(height, int(shape['y1']))
+            for x in range(x0, x1):
+                for y in range(y0, y1):
+                    selected[x][y] = True
+        elif stype == 'circle':
+            cx, cy, r = shape['cx'], shape['cy'], shape['r']
+            r_sq = r * r
+            for x in range(width):
+                for y in range(height):
+                    dx = x - cx
+                    dy = y - cy
+                    if dx * dx + dy * dy <= r_sq:
+                        selected[x][y] = True
+        elif stype == 'ring':
+            cx, cy = shape['cx'], shape['cy']
+            r_inner = shape['r_inner']
+            r_outer = shape['r_outer']
+            ri_sq = r_inner * r_inner
+            ro_sq = r_outer * r_outer
+            for x in range(width):
+                for y in range(height):
+                    dx = x - cx
+                    dy = y - cy
+                    dist_sq = dx * dx + dy * dy
+                    if ri_sq <= dist_sq <= ro_sq:
+                        selected[x][y] = True
+
+    if invert:
+        # Inverted: selected = allowed, unselected = blocked
+        return [[selected[x][y] for y in range(height)] for x in range(width)]
+    else:
+        # Normal: selected = blocked, unselected = allowed
+        return [[not selected[x][y] for y in range(height)] for x in range(width)]
+
+
+def count_masked_cells(mask):
+    """Return (allowed_count, blocked_count) for a mask grid."""
+    blocked = sum(1 for col in mask for cell in col if not cell)
+    total = len(mask) * len(mask[0]) if mask else 0
+    return (total - blocked, blocked)
+
+
+# ============================================================================
+# WFC — POSSIBILITY GRID
+# ============================================================================
 
 def create_possibility_grid(width, height):
     return [[ALL_CHARS.copy() for _ in range(height)] for _ in range(width)]
@@ -3607,7 +3780,8 @@ def find_min_entropy_cell(poss_grid, width, height):
 
 
 def collapse_cell(poss_grid, x, y, tile_weights=None, width=None, height=None,
-                  boost_port_dirs=None):
+                  boost_port_dirs=None, spatial_map=None,
+                  global_x_offset=0, global_width=None, global_height=None):
     possibilities = list(poss_grid[x][y])
     if not possibilities:
         return False
@@ -3615,6 +3789,19 @@ def collapse_cell(poss_grid, x, y, tile_weights=None, width=None, height=None,
     filtered = [(ch, w) for ch, w in zip(possibilities, weights) if w > 0]
     if not filtered:
         return False
+
+    # Apply spatial size weight multiplier
+    if spatial_map is not None and spatial_map.get('enabled', False):
+        gw = global_width if global_width is not None else width
+        gh = global_height if global_height is not None else height
+        gx = x + global_x_offset
+        spatially_weighted = []
+        for ch, w in filtered:
+            size_cat = TILE_SIZE.get(ch, 'medium')
+            sw = compute_spatial_size_weight(size_cat, gx, y, gw, gh,
+                                            spatial_map)
+            spatially_weighted.append((ch, w * sw))
+        filtered = spatially_weighted
 
     # Least-constraining value: bias toward tiles that leave more options
     # for the most-constrained uncollapsed neighbor. Cheaper than checking
@@ -3692,12 +3879,22 @@ def _wfc_backtrack(stack, poss_grid, width, height, tile_weights):
 
 
 def wave_function_collapse(width, height, tile_weights=None,
-                           max_attempts=200, progress_callback=None):
+                           max_attempts=200, progress_callback=None,
+                           mask=None, spatial_map=None):
     """Run WFC with backtracking. Returns a 2D grid of pipe chars, or None."""
+    if mask is not None:
+        tile_weights = _ensure_endcaps_for_mask(tile_weights)
     max_backtracks = width * height  # fail fast on bad seeds
     total_cells = width * height
     for attempt in range(1, max_attempts + 1):
         poss_grid = create_possibility_grid(width, height)
+
+        # Apply mask: fix blocked cells to VOID_CHAR before constraints
+        if mask is not None:
+            for x in range(width):
+                for y in range(height):
+                    if not mask[x][y]:
+                        poss_grid[x][y] = {VOID_CHAR}
 
         for x in range(width):
             for y in range(height):
@@ -3723,7 +3920,9 @@ def wave_function_collapse(width, height, tile_weights=None,
             snapshot = [[c.copy() for c in row] for row in poss_grid]
 
             if not collapse_cell(poss_grid, x, y, tile_weights,
-                                 width=width, height=height):
+                                 width=width, height=height,
+                                 spatial_map=spatial_map,
+                                 global_width=width, global_height=height):
                 # No viable options in this cell — backtrack
                 recovered = _wfc_backtrack(
                     stack, poss_grid, width, height, tile_weights)
@@ -3778,17 +3977,28 @@ def wave_function_collapse(width, height, tile_weights=None,
 
 def _solve_stripe(width, height, tile_weights=None, max_attempts=200,
                   progress_callback=None, open_edges=None,
-                  left_constraints=None):
+                  left_constraints=None, mask=None, spatial_map=None,
+                  global_x_offset=0, global_width=None, global_height=None):
     """WFC solver for a single stripe with optional open edges and left-neighbor constraints.
 
     Args:
         open_edges: frozenset of directions ('W', 'E') that are open (connect to adjacent stripes)
         left_constraints: list of tile chars for the column to the left (len=height), or None
+        mask: mask[x][y] where True=allowed, False=blocked (local stripe coords), or None
     """
+    if mask is not None:
+        tile_weights = _ensure_endcaps_for_mask(tile_weights)
     max_backtracks = width * height * 3  # more generous for stripes
     total_cells = width * height
     for attempt in range(1, max_attempts + 1):
         poss_grid = create_possibility_grid(width, height)
+
+        # Apply mask: fix blocked cells to VOID_CHAR before constraints
+        if mask is not None:
+            for x in range(width):
+                for y in range(height):
+                    if not mask[x][y]:
+                        poss_grid[x][y] = {VOID_CHAR}
 
         for x in range(width):
             for y in range(height):
@@ -3800,6 +4010,9 @@ def _solve_stripe(width, height, tile_weights=None, max_attempts=200,
         # with the previous stripe's right column
         if left_constraints:
             for y in range(height):
+                # Skip void cells — already fixed by mask, no neighbor compat needed
+                if mask is not None and not mask[0][y]:
+                    continue
                 left_tile = left_constraints[y]
                 # W neighbor compatibility
                 poss_grid[0][y] = poss_grid[0][y] & COMPAT_TABLE[left_tile]['E']
@@ -3853,7 +4066,11 @@ def _solve_stripe(width, height, tile_weights=None, max_attempts=200,
 
             if not collapse_cell(poss_grid, x, y, tile_weights,
                                  width=width, height=height,
-                                 boost_port_dirs=boost_dirs):
+                                 boost_port_dirs=boost_dirs,
+                                 spatial_map=spatial_map,
+                                 global_x_offset=global_x_offset,
+                                 global_width=global_width,
+                                 global_height=global_height):
                 recovered = _wfc_backtrack(
                     stack, poss_grid, width, height, tile_weights)
                 if not recovered:
@@ -3907,7 +4124,8 @@ def _solve_stripe(width, height, tile_weights=None, max_attempts=200,
 
 def wave_function_collapse_striped(width, height, stripe_width=8,
                                     tile_weights=None, max_attempts=200,
-                                    progress_callback=None, stripe_offset=0):
+                                    progress_callback=None, stripe_offset=0,
+                                    mask=None, spatial_map=None):
     """Generate large grids by solving vertical stripes left-to-right.
 
     Each stripe is an independent WFC problem with constrained left edge
@@ -3967,12 +4185,22 @@ def wave_function_collapse_striped(width, height, stripe_width=8,
                 progress_callback(attempt, max_attempts,
                                   _offset + cells, total_cells, backtracks)
 
+        # Slice mask for this stripe (local coords)
+        stripe_mask = None
+        if mask is not None:
+            stripe_mask = [mask[stripe_start + x] for x in range(sw)]
+
         stripe_grid = _solve_stripe(
             sw, height, tile_weights=tile_weights,
             max_attempts=max_attempts,
             progress_callback=stripe_progress,
             open_edges=open_edges,
-            left_constraints=left_constraints)
+            left_constraints=left_constraints,
+            mask=stripe_mask,
+            spatial_map=spatial_map,
+            global_x_offset=stripe_start,
+            global_width=width,
+            global_height=height)
 
         if stripe_grid is None:
             return None  # stripe failed
@@ -5572,6 +5800,11 @@ def _render_layer_to_group(
     for x in range(width):
         for y in range(height):
             ch = grid[x][y]
+            if ch == VOID_CHAR:
+                tile_count += 1
+                if progress_callback:
+                    progress_callback(progress_offset + tile_count, total_tiles)
+                continue
             xloc = (x - (width - 1) / 2.0) * 100
             yloc = (y - (height - 1) / 2.0) * 100
 

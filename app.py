@@ -120,6 +120,110 @@ with st.sidebar:
                   'long_radius': w_long_radius, 'vanishing': w_vanishing},
     }
 
+    st.header("Spatial Size Gradient")
+    SPATIAL_PRESETS = {
+        'None (disabled)': None,
+        'Thick \u2192 Thin (L\u2192R)': {
+            'type': 'horizontal',
+            'medium': {'start': 2.0, 'end': 0.2},
+            'narrow': {'start': 1.0, 'end': 1.0},
+            'tiny':   {'start': 0.2, 'end': 2.0},
+        },
+        'Thin \u2192 Thick (L\u2192R)': {
+            'type': 'horizontal',
+            'medium': {'start': 0.2, 'end': 2.0},
+            'narrow': {'start': 1.0, 'end': 1.0},
+            'tiny':   {'start': 2.0, 'end': 0.2},
+        },
+        'Thick \u2192 Thin (T\u2192B)': {
+            'type': 'vertical',
+            'medium': {'start': 2.0, 'end': 0.2},
+            'narrow': {'start': 1.0, 'end': 1.0},
+            'tiny':   {'start': 0.2, 'end': 2.0},
+        },
+        'Radial (thick center)': {
+            'type': 'radial',
+            'medium': {'start': 2.0, 'end': 0.2},
+            'narrow': {'start': 1.0, 'end': 1.0},
+            'tiny':   {'start': 0.2, 'end': 2.0},
+        },
+        'Radial (thin center)': {
+            'type': 'radial',
+            'medium': {'start': 0.2, 'end': 2.0},
+            'narrow': {'start': 1.0, 'end': 1.0},
+            'tiny':   {'start': 2.0, 'end': 0.2},
+        },
+        'Custom': 'custom',
+    }
+
+    spatial_preset = st.selectbox(
+        "Gradient Preset",
+        list(SPATIAL_PRESETS.keys()),
+        index=0,
+        help="Bias pipe size selection by position across the grid"
+    )
+
+    spatial_map = None
+    if spatial_preset != 'None (disabled)':
+        preset_val = SPATIAL_PRESETS[spatial_preset]
+
+        if preset_val == 'custom':
+            gradient_type = st.selectbox("Gradient Type",
+                                          ['horizontal', 'vertical', 'radial'])
+        else:
+            gradient_type = preset_val['type']
+
+        if gradient_type == 'radial':
+            start_label, end_label = "Center", "Edge"
+        elif gradient_type == 'vertical':
+            start_label, end_label = "Top", "Bottom"
+        else:
+            start_label, end_label = "Left", "Right"
+
+        if preset_val not in (None, 'custom'):
+            defaults = preset_val
+        else:
+            defaults = {
+                'medium': {'start': 1.0, 'end': 1.0},
+                'narrow': {'start': 1.0, 'end': 1.0},
+                'tiny':   {'start': 1.0, 'end': 1.0},
+            }
+
+        with st.expander("Per-Size Endpoint Weights",
+                          expanded=(preset_val == 'custom')):
+            col1, col2 = st.columns(2)
+            with col1:
+                st.caption(start_label)
+                sm_start = st.slider("Medium ({})".format(start_label),
+                                      0.1, 3.0, defaults['medium']['start'], 0.1,
+                                      key='sp_m_start')
+                sn_start = st.slider("Narrow ({})".format(start_label),
+                                      0.1, 3.0, defaults['narrow']['start'], 0.1,
+                                      key='sp_n_start')
+                st_start = st.slider("Tiny ({})".format(start_label),
+                                      0.1, 3.0, defaults['tiny']['start'], 0.1,
+                                      key='sp_t_start')
+            with col2:
+                st.caption(end_label)
+                sm_end = st.slider("Medium ({})".format(end_label),
+                                    0.1, 3.0, defaults['medium']['end'], 0.1,
+                                    key='sp_m_end')
+                sn_end = st.slider("Narrow ({})".format(end_label),
+                                    0.1, 3.0, defaults['narrow']['end'], 0.1,
+                                    key='sp_n_end')
+                st_end = st.slider("Tiny ({})".format(end_label),
+                                    0.1, 3.0, defaults['tiny']['end'], 0.1,
+                                    key='sp_t_end')
+
+        spatial_map = {
+            'enabled': True,
+            'type': gradient_type,
+            'medium': {'start': sm_start, 'end': sm_end},
+            'narrow': {'start': sn_start, 'end': sn_end},
+            'tiny':   {'start': st_start, 'end': st_end},
+            'min_weight': 0.05,
+        }
+
     st.header("Grid Settings")
     grid_width = st.slider("Grid Width", 4, 80, 8)
     grid_height = st.slider("Grid Height", 4, 80, 8)
@@ -131,6 +235,108 @@ with st.sidebar:
                                      help="Base width of each stripe (randomized ±3)")
     else:
         stripe_width = 8
+
+    st.header("Masking")
+    mask_enabled = st.checkbox("Enable Masking", value=False,
+                                help="Block regions of the grid before generation")
+
+    mask_shapes = []
+    mask_invert = False
+
+    if mask_enabled:
+        mask_invert = st.checkbox(
+            "Invert Mask", value=False,
+            help="OFF: shapes define blocked (void) regions. "
+                 "ON: shapes define allowed regions — everything else is void.")
+
+        if 'mask_shapes' not in st.session_state:
+            st.session_state.mask_shapes = []
+
+        st.caption("Coordinates are in grid cells (0,0 = top-left). "
+                   "A {}x{} grid has cells 0\u2013{} across and 0\u2013{} down.".format(
+                       grid_width, grid_height, grid_width - 1, grid_height - 1))
+
+        with st.expander("Add Mask Shape", expanded=True):
+            shape_type = st.selectbox("Shape Type",
+                                       ["rectangle", "circle", "ring"])
+
+            if shape_type == "rectangle":
+                col1, col2 = st.columns(2)
+                with col1:
+                    rect_x0 = st.number_input("X Start", 0, grid_width - 1, 1)
+                    rect_y0 = st.number_input("Y Start", 0, grid_height - 1, 1)
+                with col2:
+                    rect_x1 = st.number_input("X End", 1, grid_width,
+                                               min(grid_width, rect_x0 + 3))
+                    rect_y1 = st.number_input("Y End", 1, grid_height,
+                                               min(grid_height, rect_y0 + 3))
+                new_shape = {'type': 'rectangle',
+                             'x0': rect_x0, 'y0': rect_y0,
+                             'x1': rect_x1, 'y1': rect_y1}
+
+            elif shape_type == "circle":
+                cx = st.slider("Center X", 0.0, float(grid_width - 1),
+                                float(grid_width) / 2, 0.5)
+                cy = st.slider("Center Y", 0.0, float(grid_height - 1),
+                                float(grid_height) / 2, 0.5)
+                max_r = max(grid_width, grid_height) / 2.0
+                r = st.slider("Radius", 0.5, max_r, min(3.0, max_r), 0.5)
+                new_shape = {'type': 'circle', 'cx': cx, 'cy': cy, 'r': r}
+
+            elif shape_type == "ring":
+                cx = st.slider("Ring Center X", 0.0, float(grid_width - 1),
+                                float(grid_width) / 2, 0.5)
+                cy = st.slider("Ring Center Y", 0.0, float(grid_height - 1),
+                                float(grid_height) / 2, 0.5)
+                max_r = max(grid_width, grid_height) / 2.0
+                r_inner = st.slider("Inner Radius", 0.5, max_r,
+                                     min(1.5, max_r), 0.5)
+                r_outer = st.slider("Outer Radius", r_inner + 0.5, max_r + 2,
+                                     min(r_inner + 2.0, max_r + 2), 0.5)
+                new_shape = {'type': 'ring', 'cx': cx, 'cy': cy,
+                             'r_inner': r_inner, 'r_outer': r_outer}
+
+            if st.button("Add Shape"):
+                st.session_state.mask_shapes.append(new_shape)
+                st.rerun()
+
+        if st.session_state.mask_shapes:
+            st.caption("Active Shapes:")
+            for idx, shape in enumerate(st.session_state.mask_shapes):
+                col1, col2 = st.columns([3, 1])
+                with col1:
+                    if shape['type'] == 'rectangle':
+                        st.text("Rect ({},{}) to ({},{})".format(
+                            shape['x0'], shape['y0'],
+                            shape['x1'], shape['y1']))
+                    elif shape['type'] == 'circle':
+                        st.text("Circle c=({},{}) r={}".format(
+                            shape['cx'], shape['cy'], shape['r']))
+                    elif shape['type'] == 'ring':
+                        st.text("Ring c=({},{}) r={}-{}".format(
+                            shape['cx'], shape['cy'],
+                            shape['r_inner'], shape['r_outer']))
+                with col2:
+                    if st.button("X", key="rm_shape_{}".format(idx)):
+                        st.session_state.mask_shapes.pop(idx)
+                        st.rerun()
+
+            if st.button("Clear All Shapes"):
+                st.session_state.mask_shapes = []
+                st.rerun()
+
+        if st.session_state.mask_shapes:
+            mask_preview = pipe_core.build_mask(
+                grid_width, grid_height,
+                st.session_state.mask_shapes,
+                invert=mask_invert)
+            allowed, blocked = pipe_core.count_masked_cells(mask_preview)
+            total = allowed + blocked
+            st.caption("{} allowed, {} blocked ({:.0f}% void)".format(
+                allowed, blocked,
+                100 * blocked / total if total > 0 else 0))
+
+        mask_shapes = st.session_state.mask_shapes
 
     st.header("Multi-Layer")
     multilayer_enabled = st.checkbox("Enable Multi-Layer", value=False,
@@ -194,8 +400,20 @@ with st.sidebar:
         st.session_state.pop('render_key', None)
 
 if view_mode == "Pipe Network":
-    # Generate grid(s) if needed
-    current_dims = (grid_width, grid_height, multilayer_enabled)
+    # Build mask if enabled
+    wfc_mask = None
+    if mask_enabled and mask_shapes:
+        wfc_mask = pipe_core.build_mask(grid_width, grid_height,
+                                         mask_shapes, invert=mask_invert)
+
+    # Generate grid(s) if needed — include mask state in cache key
+    mask_key = None
+    if mask_enabled and mask_shapes:
+        mask_key = (tuple(tuple(sorted(s.items())) for s in mask_shapes),
+                    mask_invert)
+    spatial_key = str(spatial_map) if spatial_map else None
+    current_dims = (grid_width, grid_height, multilayer_enabled,
+                    mask_enabled, mask_key, spatial_key)
 
     def _run_wfc(progress_label="", progress_scale=1.0, progress_offset=0.0, stripe_offset=0):
         """Run WFC with progress callback."""
@@ -210,11 +428,13 @@ if view_mode == "Pipe Network":
             return pipe_core.wave_function_collapse_striped(
                 grid_width, grid_height, stripe_width=stripe_width,
                 tile_weights=tile_weights, progress_callback=wfc_update,
-                stripe_offset=stripe_offset)
+                stripe_offset=stripe_offset, mask=wfc_mask,
+                spatial_map=spatial_map)
         else:
             return pipe_core.wave_function_collapse(
                 grid_width, grid_height, tile_weights=tile_weights,
-                progress_callback=wfc_update)
+                progress_callback=wfc_update, mask=wfc_mask,
+                spatial_map=spatial_map)
 
     if 'grid' not in st.session_state or st.session_state.get('grid_dims') != current_dims:
         # New grid means cached SVG is stale
