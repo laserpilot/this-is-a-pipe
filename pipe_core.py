@@ -4,6 +4,63 @@ import math
 from collections import deque
 from shapely.geometry import Polygon, LineString
 from shapely.ops import unary_union
+from shapely import affinity
+
+
+# ============================================================================
+# SCALED MULTI-LAYER HELPERS
+# ============================================================================
+
+def make_layer_spec(grid, scale=1.0, offset=(0, 0),
+                    stroke_width=0.5, shading_style='directional-hatch',
+                    shading_stroke_width=0.3, shading_params=None,
+                    decorations_enabled=False, decoration_density=0.10,
+                    decoration_stroke_width=None, decoration_scale=1.0,
+                    name=None, color='black'):
+    """Create a LayerSpec dict with all per-layer rendering parameters."""
+    return {
+        'grid': grid,
+        'scale': scale,
+        'offset': offset,
+        'stroke_width': stroke_width,
+        'shading_style': shading_style,
+        'shading_stroke_width': shading_stroke_width,
+        'shading_params': shading_params,
+        'decorations_enabled': decorations_enabled,
+        'decoration_density': decoration_density,
+        'decoration_stroke_width': decoration_stroke_width,
+        'decoration_scale': decoration_scale,
+        'name': name,
+        'color': color,
+    }
+
+
+def _poly_local_to_world(poly, scale, offset):
+    """Transform a polygon from layer-local coords to world coords.
+
+    World = (local * scale) + offset.
+    """
+    if poly is None:
+        return None
+    result = affinity.scale(poly, xfact=scale, yfact=scale, origin=(0, 0))
+    if offset != (0, 0):
+        result = affinity.translate(result, xoff=offset[0], yoff=offset[1])
+    return result
+
+
+def _poly_world_to_local(poly, scale, offset):
+    """Transform a polygon from world coords to layer-local coords.
+
+    Local = (world - offset) / scale.
+    """
+    if poly is None:
+        return None
+    result = poly
+    if offset != (0, 0):
+        result = affinity.translate(result, xoff=-offset[0], yoff=-offset[1])
+    result = affinity.scale(result, xfact=1.0 / scale, yfact=1.0 / scale, origin=(0, 0))
+    return result
+
 
 # ============================================================================
 # DIRECTIONAL SHADING HELPERS
@@ -5992,6 +6049,159 @@ def render_multilayer_svg(
         layer_group.append(outlines_group)
         layer_group.append(shading_group)
         if decorations_enabled:
+            layer_group.append(decorations_group)
+        d.append(layer_group)
+
+    return d.as_svg()
+
+
+def render_scaled_multilayer_svg(layer_specs, light_angle_deg=225,
+                                  progress_callback=None):
+    """Render multiple layers with independent scaling to a single SVG.
+
+    Each layer_spec is a dict from make_layer_spec() with grid, scale,
+    offset, and per-layer rendering params.
+
+    Layers are ordered bottom (index 0) to top (index -1).
+    Upper layers occlude lower layers. Scaling is applied via SVG group
+    transforms; stroke widths are counter-scaled to remain constant.
+
+    Args:
+        layer_specs: list of LayerSpec dicts
+        light_angle_deg: global light direction
+        progress_callback: fn(current, total) for progress
+
+    Returns:
+        SVG string
+    """
+    num_layers = len(layer_specs)
+
+    # --- Phase 1: Build local polygon caches ---
+    poly_caches_local = []
+    for spec in layer_specs:
+        grid = spec['grid']
+        width = len(grid)
+        height = len(grid[0]) if width > 0 else 0
+        cache = {}
+        for x in range(width):
+            for y in range(height):
+                ch = grid[x][y]
+                xloc = (x - (width - 1) / 2.0) * 100
+                yloc = (y - (height - 1) / 2.0) * 100
+                poly = get_pipe_polygon(ch, xloc, yloc)
+                if poly is not None:
+                    poly = poly.buffer(0)
+                    if poly.is_valid and not poly.is_empty:
+                        cache[(x, y)] = poly
+        poly_caches_local.append(cache)
+
+    # --- Phase 2: Build world-space layer unions for cross-layer occlusion ---
+    layer_unions_world = []
+    for i, spec in enumerate(layer_specs):
+        pad = max(spec['stroke_width'], spec['shading_stroke_width']) * 0.5 + 0.1
+        local_union = _build_full_layer_union(poly_caches_local[i], pad=pad)
+        world_union = _poly_local_to_world(local_union, spec['scale'], spec['offset'])
+        layer_unions_world.append(world_union)
+
+    # --- Phase 3: Build cross-layer occlusion in each layer's local space ---
+    extra_occlusions_local = [None] * num_layers
+    for i in range(num_layers):
+        above_polys = []
+        for j in range(i + 1, num_layers):
+            if layer_unions_world[j] is not None:
+                above_polys.append(layer_unions_world[j])
+
+        if not above_polys:
+            continue
+
+        if len(above_polys) == 1:
+            world_occlusion = above_polys[0]
+        else:
+            world_occlusion = unary_union(above_polys).buffer(0)
+
+        # Transform world occlusion into layer i's local coordinate space
+        extra_occlusions_local[i] = _poly_world_to_local(
+            world_occlusion, layer_specs[i]['scale'], layer_specs[i]['offset']
+        )
+
+    # --- Phase 4: Compute canvas bounds (symmetric about origin) ---
+    x_extents = []
+    y_extents = []
+    for spec in layer_specs:
+        grid = spec['grid']
+        width = len(grid)
+        height = len(grid[0]) if width > 0 else 0
+        s = spec['scale']
+        ox, oy = spec['offset']
+        half_w = width * 50 * s
+        half_h = height * 50 * s
+        x_extents.extend([abs(-half_w + ox), abs(half_w + ox)])
+        y_extents.extend([abs(-half_h + oy), abs(half_h + oy)])
+
+    canvas_w = 2 * max(x_extents) if x_extents else 800
+    canvas_h = 2 * max(y_extents) if y_extents else 800
+
+    d = draw.Drawing(canvas_w, canvas_h, origin='center', displayInline=False)
+
+    # --- Phase 5: Render each layer (bottom to top) ---
+    total_tiles = sum(
+        len(spec['grid']) * (len(spec['grid'][0]) if spec['grid'] else 0)
+        for spec in layer_specs
+    )
+    tiles_done = 0
+
+    for i, spec in enumerate(layer_specs):
+        grid = spec['grid']
+        width = len(grid)
+        height = len(grid[0]) if width > 0 else 0
+        s = spec['scale']
+        ox, oy = spec['offset']
+        color = spec.get('color', 'black')
+        name = spec.get('name') or 'layer-{}'.format(i)
+
+        # SVG transform: translate then scale (rightmost applied first)
+        transform_str = 'translate({},{}) scale({})'.format(ox, oy, s)
+
+        layer_group = draw.Group(
+            id=name, transform=transform_str,
+            **{'data-color': color}
+        )
+        outlines_group = draw.Group(id='{}-outlines'.format(name))
+        shading_group = draw.Group(id='{}-shading'.format(name))
+        decorations_group = draw.Group(id='{}-decorations'.format(name))
+
+        # Counter-scale stroke widths so they appear constant after SVG scaling
+        effective_stroke = spec['stroke_width'] / s
+        effective_shading_stroke = spec['shading_stroke_width'] / s
+        effective_deco_stroke = (
+            spec['decoration_stroke_width'] / s
+            if spec['decoration_stroke_width'] is not None
+            else None
+        )
+
+        _render_layer_to_group(
+            grid,
+            outlines_group, shading_group,
+            decorations_group if spec['decorations_enabled'] else None,
+            poly_caches_local[i],
+            extra_occlusions_local[i],
+            effective_stroke, spec['shading_style'], effective_shading_stroke,
+            light_angle_deg=light_angle_deg,
+            shading_params=spec['shading_params'],
+            decorations_enabled=spec['decorations_enabled'],
+            decoration_density=spec['decoration_density'],
+            decoration_stroke_width=effective_deco_stroke,
+            decoration_scale=spec['decoration_scale'],
+            progress_callback=progress_callback,
+            progress_offset=tiles_done,
+            progress_total=total_tiles,
+        )
+        tiles_done += width * height
+
+        # Assemble group hierarchy
+        layer_group.append(outlines_group)
+        layer_group.append(shading_group)
+        if spec['decorations_enabled']:
             layer_group.append(decorations_group)
         d.append(layer_group)
 

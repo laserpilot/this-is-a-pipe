@@ -140,9 +140,29 @@ with st.sidebar:
                                        help="data-color attribute for pen plotter")
         layer_1_color = st.text_input("Top Layer Color", value="black",
                                        help="data-color attribute for pen plotter")
+        scaled_layers_enabled = st.checkbox("Enable Per-Layer Scaling", value=False,
+                                             help="Scale layers independently for depth effect")
+        if scaled_layers_enabled:
+            layer_0_scale = st.slider("Bottom Layer Scale", 0.5, 2.0, 1.0, 0.05)
+            layer_1_scale = st.slider("Top Layer Scale", 0.5, 2.0, 1.2, 0.05)
+            with st.expander("Layer Offsets"):
+                layer_0_offset_x = st.slider("Bottom X Offset", -200, 200, 0, 10)
+                layer_0_offset_y = st.slider("Bottom Y Offset", -200, 200, 0, 10)
+                layer_1_offset_x = st.slider("Top X Offset", -200, 200, 0, 10)
+                layer_1_offset_y = st.slider("Top Y Offset", -200, 200, 0, 10)
+        else:
+            layer_0_scale = 1.0
+            layer_1_scale = 1.0
+            layer_0_offset_x = layer_0_offset_y = 0
+            layer_1_offset_x = layer_1_offset_y = 0
     else:
         layer_0_color = "red"
         layer_1_color = "black"
+        scaled_layers_enabled = False
+        layer_0_scale = 1.0
+        layer_1_scale = 1.0
+        layer_0_offset_x = layer_0_offset_y = 0
+        layer_1_offset_x = layer_1_offset_y = 0
 
     st.header("Decorations")
     decorations_enabled = st.checkbox("Enable Pipe Decorations", value=False,
@@ -236,7 +256,10 @@ if view_mode == "Pipe Network":
                       light_angle, str(shading_params),
                       decorations_enabled, decoration_density, decoration_stroke_width,
                       decoration_scale,
-                      multilayer_enabled, layer_0_color, layer_1_color)
+                      multilayer_enabled, layer_0_color, layer_1_color,
+                      scaled_layers_enabled, layer_0_scale, layer_1_scale,
+                      layer_0_offset_x, layer_0_offset_y,
+                      layer_1_offset_x, layer_1_offset_y)
 
         if st.session_state.get('render_key') != render_key or 'svg_string' not in st.session_state:
             progress_bar = st.progress(0, text="Rendering tiles...")
@@ -244,7 +267,33 @@ if view_mode == "Pipe Network":
             def update_progress(current, total):
                 progress_bar.progress(current / total, text="Rendering tile {} / {}".format(current, total))
 
-            if multilayer_enabled:
+            if multilayer_enabled and scaled_layers_enabled:
+                layer_specs = []
+                for idx, (g, color, scale, offset) in enumerate([
+                    (st.session_state.grids[0], layer_0_color, layer_0_scale,
+                     (layer_0_offset_x, layer_0_offset_y)),
+                    (st.session_state.grids[1], layer_1_color, layer_1_scale,
+                     (layer_1_offset_x, layer_1_offset_y)),
+                ]):
+                    layer_specs.append(pipe_core.make_layer_spec(
+                        grid=g, scale=scale, offset=offset,
+                        stroke_width=stroke_width,
+                        shading_style=shading_style,
+                        shading_stroke_width=shading_stroke_width,
+                        shading_params=shading_params,
+                        decorations_enabled=decorations_enabled,
+                        decoration_density=decoration_density,
+                        decoration_stroke_width=decoration_stroke_width,
+                        decoration_scale=decoration_scale,
+                        name='layer-{}'.format(idx),
+                        color=color,
+                    ))
+                svg_string = pipe_core.render_scaled_multilayer_svg(
+                    layer_specs,
+                    light_angle_deg=light_angle,
+                    progress_callback=update_progress,
+                )
+            elif multilayer_enabled:
                 svg_string = pipe_core.render_multilayer_svg(
                     st.session_state.grids,
                     stroke_width, shading_style, shading_stroke_width,
