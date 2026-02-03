@@ -1250,12 +1250,15 @@ def draw_vanishing_directional_shading(drawing, ch, xloc, yloc, light_dir, sw, p
 
 # Mixed-size corner params: char -> (rotation_deg, hw_arm1, hw_arm2)
 # Base orientation (rot=0): arm1 goes South, arm2 goes East (like 'r' corner)
-# rot=90: arm1=S,arm2=W (like '7'), rot=180: arm1=N,arm2=W (like 'j'), rot=270: arm1=N,arm2=E (like 'L')
+# After rotation, arm directions change:
+#   rot=0:   arm1→S, arm2→E | rot=90:  arm1→W, arm2→S
+#   rot=180: arm1→N, arm2→W | rot=270: arm1→E, arm2→N
+# For 90°/270°, arms swap cardinal directions, so we swap hw1/hw2 to match PORTS
 _MIXED_CORNER_PARAMS = {
-    'mnr': (0, 30, 12),   'mn7': (90, 30, 12),
-    'mnj': (180, 30, 12), 'mnL': (270, 30, 12),
-    'nmr': (0, 12, 30),   'nm7': (90, 12, 30),
-    'nmj': (180, 12, 30), 'nmL': (270, 12, 30),
+    'mnr': (0, 30, 12),   'mn7': (90, 12, 30),   # 90°: swapped
+    'mnj': (180, 30, 12), 'mnL': (270, 12, 30),  # 270°: swapped
+    'nmr': (0, 12, 30),   'nm7': (90, 30, 12),   # 90°: swapped
+    'nmj': (180, 12, 30), 'nmL': (270, 30, 12),  # 270°: swapped
 }
 
 
