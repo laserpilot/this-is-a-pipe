@@ -1136,118 +1136,6 @@ def draw_endcap_directional_shading(drawing, ch, xloc, yloc, light_dir, sw, para
                             pipe_polygon, occlusion_polygon)
 
 
-# Vanishing pipe params: char -> (direction, half_width)
-# Tapered dead-end: full width at port edge, tapering to a point at cell center.
-_VANISHING_PARAMS = {
-    'vN': ('N', 30),  'vS': ('S', 30),  'vE': ('E', 30),  'vW': ('W', 30),
-    'nvN': ('N', 12), 'nvS': ('S', 12), 'nvE': ('E', 12), 'nvW': ('W', 12),
-    'tvN': ('N', 5),  'tvS': ('S', 5),  'tvE': ('E', 5),  'tvW': ('W', 5),
-}
-
-
-def get_vanishing_polygon(ch, xloc, yloc):
-    """Return Shapely Polygon for a vanishing pipe (tapered dead-end triangle)."""
-    direction, hw = _VANISHING_PARAMS[ch]
-    if direction == 'N':
-        pts = [(xloc - hw, yloc - 50), (xloc + hw, yloc - 50), (xloc, yloc)]
-    elif direction == 'S':
-        pts = [(xloc - hw, yloc + 50), (xloc + hw, yloc + 50), (xloc, yloc)]
-    elif direction == 'E':
-        pts = [(xloc + 50, yloc - hw), (xloc + 50, yloc + hw), (xloc, yloc)]
-    elif direction == 'W':
-        pts = [(xloc - 50, yloc - hw), (xloc - 50, yloc + hw), (xloc, yloc)]
-    else:
-        return None
-    return Polygon(pts)
-
-
-def draw_vanishing_outline(drawing, ch, xloc, yloc, occlusion_poly, sw):
-    """Draw outline for a vanishing pipe: 2 taper lines + port opening line."""
-    direction, hw = _VANISHING_PARAMS[ch]
-    if direction == 'N':
-        clip_and_draw_line(drawing, xloc - hw, yloc - 50, xloc, yloc, occlusion_poly, sw)
-        clip_and_draw_line(drawing, xloc + hw, yloc - 50, xloc, yloc, occlusion_poly, sw)
-        clip_and_draw_line(drawing, xloc - hw, yloc - 50, xloc + hw, yloc - 50, occlusion_poly, sw)
-    elif direction == 'S':
-        clip_and_draw_line(drawing, xloc - hw, yloc + 50, xloc, yloc, occlusion_poly, sw)
-        clip_and_draw_line(drawing, xloc + hw, yloc + 50, xloc, yloc, occlusion_poly, sw)
-        clip_and_draw_line(drawing, xloc - hw, yloc + 50, xloc + hw, yloc + 50, occlusion_poly, sw)
-    elif direction == 'E':
-        clip_and_draw_line(drawing, xloc + 50, yloc - hw, xloc, yloc, occlusion_poly, sw)
-        clip_and_draw_line(drawing, xloc + 50, yloc + hw, xloc, yloc, occlusion_poly, sw)
-        clip_and_draw_line(drawing, xloc + 50, yloc - hw, xloc + 50, yloc + hw, occlusion_poly, sw)
-    elif direction == 'W':
-        clip_and_draw_line(drawing, xloc - 50, yloc - hw, xloc, yloc, occlusion_poly, sw)
-        clip_and_draw_line(drawing, xloc - 50, yloc + hw, xloc, yloc, occlusion_poly, sw)
-        clip_and_draw_line(drawing, xloc - 50, yloc - hw, xloc - 50, yloc + hw, occlusion_poly, sw)
-
-
-def draw_vanishing_directional_shading(drawing, ch, xloc, yloc, light_dir, sw, params,
-                                        pipe_polygon=None, occlusion_polygon=None):
-    """Draw directional hatch marks on a vanishing pipe (tapered dead-end).
-
-    Uses the same approach as endcap shading but polygon-clipped to the
-    triangular taper shape, so hatches naturally shorten toward the tip.
-    """
-    direction, hw = _VANISHING_PARAMS[ch]
-
-    if direction == 'N':
-        tangent = (0, -1)
-        normal_left, normal_right = (-1, 0), (1, 0)
-    elif direction == 'S':
-        tangent = (0, 1)
-        normal_left, normal_right = (-1, 0), (1, 0)
-    elif direction == 'E':
-        tangent = (1, 0)
-        normal_left, normal_right = (0, -1), (0, 1)
-    else:  # W
-        tangent = (-1, 0)
-        normal_left, normal_right = (0, -1), (0, 1)
-
-    scale = hw / 30
-    band_width = params['band_width'] * scale
-    band_offset = params['band_offset'] * scale
-    spacing = params['spacing'] * scale
-    hatch_angle = params['angle']
-    jitter_pos = params['jitter_pos'] * scale
-    jitter_angle = params['jitter_angle']
-    band_width_jitter = params.get('band_width_jitter', 0.0)
-    wiggle = params.get('wiggle', 0.0) * scale
-
-    dot_left = _dot(normal_left, light_dir)
-    dot_right = _dot(normal_right, light_dir)
-    shadow_normal = normal_left if dot_left < dot_right else normal_right
-    band_center_dist = hw - band_offset - band_width / 2
-
-    angles_to_draw = [hatch_angle]
-    if params.get('crosshatch'):
-        angles_to_draw.append(hatch_angle + params.get('crosshatch_angle', 90))
-
-    # Full cell length: 50 units from center to edge
-    num_hatches = max(1, int(50 / spacing))
-    for base_angle in angles_to_draw:
-        for i in range(num_hatches + 1):
-            t = i * (50.0 / num_hatches)
-            t += random.uniform(-jitter_pos, jitter_pos)
-
-            base_x = xloc + tangent[0] * t + shadow_normal[0] * band_center_dist
-            base_y = yloc + tangent[1] * t + shadow_normal[1] * band_center_dist
-
-            angle = base_angle + random.uniform(-jitter_angle, jitter_angle)
-            hatch_dir = _rotate_vec(tangent, angle)
-
-            width_mult = 1.0 + random.uniform(-band_width_jitter, band_width_jitter)
-            half_len = (band_width * 0.6) * width_mult
-
-            x1 = base_x - hatch_dir[0] * half_len
-            y1 = base_y - hatch_dir[1] * half_len
-            x2 = base_x + hatch_dir[0] * half_len
-            y2 = base_y + hatch_dir[1] * half_len
-
-            _draw_hatch_line(drawing, x1, y1, x2, y2, hatch_dir, wiggle, sw,
-                            pipe_polygon, occlusion_polygon)
-
-
 # Mixed-size corner params: char -> (rotation_deg, hw_arm1, hw_arm2)
 # Base orientation (rot=0): arm1 goes South, arm2 goes East (like 'r' corner)
 # After rotation, arm directions change:
@@ -2037,10 +1925,6 @@ def get_pipe_polygon(ch, xloc, yloc):
     # Cardinal endcaps
     elif ch in _ENDCAP_PARAMS:
         return get_endcap_polygon(ch, xloc, yloc)
-
-    # Vanishing pipes
-    elif ch in _VANISHING_PARAMS:
-        return get_vanishing_polygon(ch, xloc, yloc)
 
     # Mixed-size corners
     elif ch in _MIXED_CORNER_PARAMS:
@@ -3152,11 +3036,6 @@ PORTS = {
     'neN': {'N': 'n'}, 'neS': {'S': 'n'}, 'neE': {'E': 'n'}, 'neW': {'W': 'n'},
     'teN': {'N': 't'}, 'teS': {'S': 't'}, 'teE': {'E': 't'}, 'teW': {'W': 't'},
 
-    # Vanishing pipes (tapered dead-ends, single port)
-    'vN': {'N': 'm'},  'vS': {'S': 'm'},  'vE': {'E': 'm'},  'vW': {'W': 'm'},
-    'nvN': {'N': 'n'}, 'nvS': {'S': 'n'}, 'nvE': {'E': 'n'}, 'nvW': {'W': 'n'},
-    'tvN': {'N': 't'}, 'tvS': {'S': 't'}, 'tvE': {'E': 't'}, 'tvW': {'W': 't'},
-
     # Mixed-size corners (medium↔narrow, 90° turns connecting different sizes)
     'mnr': {'S': 'm', 'E': 'n'}, 'mn7': {'S': 'm', 'W': 'n'},
     'mnj': {'N': 'm', 'W': 'n'}, 'mnL': {'N': 'm', 'E': 'n'},
@@ -3213,7 +3092,7 @@ for _ch in ['|', '-', 'r', '7', 'j', 'L', '+', 'X', 'T', 'B', 'E', 'W',
             'gr', 'g7', 'gj', 'gL',
             'lr', 'l7', 'lj', 'lL',
             'cr', 'c7', 'cj', 'cL', 'dr', 'd7', 'dj', 'dL',
-            'eN', 'eS', 'eE', 'eW', 'vN', 'vS', 'vE', 'vW']:
+            'eN', 'eS', 'eE', 'eW']:
     TILE_SIZE[_ch] = 'medium'
 for _ch in ['i', '=', 'nr', 'n7', 'nj', 'nL', 'nX', 'nT', 'nB', 'nE', 'nW',
             'nz>', 'nz<', 'nz^', 'nzv', 'ns>', 'ns<', 'ns^', 'nsv',
@@ -3222,7 +3101,7 @@ for _ch in ['i', '=', 'nr', 'n7', 'nj', 'nL', 'nX', 'nT', 'nB', 'nE', 'nW',
             'ncr', 'nc7', 'ncj', 'ncL', 'ndr', 'nd7', 'ndj', 'ndL',
             'nDa', 'nDd', 'naSne', 'naWse', 'naNsw', 'naEnw', 'naWne', 'naNse', 'naEsw', 'naSnw',
             'ndce', 'ndcs', 'ndcw', 'ndcn', 'ndne', 'ndse', 'ndsw', 'ndnw',
-            'neN', 'neS', 'neE', 'neW', 'nvN', 'nvS', 'nvE', 'nvW']:
+            'neN', 'neS', 'neE', 'neW']:
     TILE_SIZE[_ch] = 'narrow'
 for _ch in ['!', '.', 'tr', 't7', 'tj', 'tL', 'tX', 'tT', 'tB', 'tE', 'tW',
             'tz>', 'tz<', 'tz^', 'tzv', 'ts>', 'ts<', 'ts^', 'tsv',
@@ -3231,7 +3110,7 @@ for _ch in ['!', '.', 'tr', 't7', 'tj', 'tL', 'tX', 'tT', 'tB', 'tE', 'tW',
             'tcr', 'tc7', 'tcj', 'tcL', 'tdr', 'td7', 'tdj', 'tdL',
             'tDa', 'tDd', 'taSne', 'taWse', 'taNsw', 'taEnw', 'taWne', 'taNse', 'taEsw', 'taSnw',
             'tdce', 'tdcs', 'tdcw', 'tdcn', 'tdne', 'tdse', 'tdsw', 'tdnw',
-            'teN', 'teS', 'teE', 'teW', 'tvN', 'tvS', 'tvE', 'tvW']:
+            'teN', 'teS', 'teE', 'teW']:
     TILE_SIZE[_ch] = 'tiny'
 for _ch in ['Rv', 'RV', 'Rh', 'RH']:
     TILE_SIZE[_ch] = 'reducer_mn'
@@ -3281,8 +3160,6 @@ for _ch in _DIAG_ENDCAP_PARAMS:
     TILE_SHAPE[_ch] = 'diagonal_endcap'
 for _ch in _ENDCAP_PARAMS:
     TILE_SHAPE[_ch] = 'endcap'
-for _ch in _VANISHING_PARAMS:
-    TILE_SHAPE[_ch] = 'vanishing'
 for _ch in _MIXED_CORNER_PARAMS:
     TILE_SHAPE[_ch] = 'mixed_corner'
 TILE_SIZE[VOID_CHAR] = 'void'
@@ -3307,7 +3184,6 @@ CATALOG_TILES = [
     ('diag corner',      {'narrow': 'ndce',  'tiny': 'tdce'}),
     ('diagonal endcap',  {'narrow': 'ndne',  'tiny': 'tdne'}),
     ('endcap',           {'medium': 'eN',    'narrow': 'neN',   'tiny': 'teN'}),
-    ('vanishing',        {'medium': 'vN',    'narrow': 'nvN',   'tiny': 'tvN'}),
     ('mixed corner',     {'medium': 'mnr'}),
     ('diag crossover',   {'narrow': 'xHa'}),
 ]
@@ -3337,7 +3213,7 @@ DIAG_CROSSOVER_TUBES = {
 
 
 def _ensure_endcaps_for_mask(tile_weights):
-    """Return tile_weights with endcaps/vanishing enabled (needed for mask boundaries)."""
+    """Return tile_weights with endcaps enabled (needed for mask boundaries)."""
     if tile_weights is None:
         tile_weights = {
             'size': {'medium': 1.0, 'narrow': 1.0, 'tiny': 1.0},
@@ -3347,7 +3223,7 @@ def _ensure_endcaps_for_mask(tile_weights):
                 'diagonal_endcap': 0.0, 'mixed_corner': 0.0,
                 'sbend': 0.0, 'segmented': 0.0, 'long_radius': 0.0,
                 'chamfer': 0.0, 'teardrop': 0.0,
-                'endcap': 0.5, 'vanishing': 0.5,
+                'endcap': 0.5,
             },
         }
     else:
@@ -3357,8 +3233,6 @@ def _ensure_endcaps_for_mask(tile_weights):
         }
         if tw['shape'].get('endcap', 0) <= 0:
             tw['shape']['endcap'] = 0.5
-        if tw['shape'].get('vanishing', 0) <= 0:
-            tw['shape']['vanishing'] = 0.5
         tile_weights = tw
     return tile_weights
 
@@ -3370,7 +3244,7 @@ def get_tile_weight(ch, tile_weights):
     if tile_weights is None:
         shape = TILE_SHAPE.get(ch)
         if shape in ('diagonal', 'diagonal_endcap', 'endcap', 'mixed_corner',
-                     'vanishing', 'segmented', 'long_radius', 'sbend'):
+                     'segmented', 'long_radius', 'sbend'):
             return 0  # Off by default — user opts in
         if ch in CROSSOVER_TUBES:
             return 2
@@ -5911,8 +5785,6 @@ def _render_layer_to_group(
                 draw_diagonal_endcap_outline(outlines_target, ch, xloc, yloc, occlusion_poly, stroke_width)
             elif ch in _ENDCAP_PARAMS:
                 draw_endcap_outline(outlines_target, ch, xloc, yloc, occlusion_poly, stroke_width)
-            elif ch in _VANISHING_PARAMS:
-                draw_vanishing_outline(outlines_target, ch, xloc, yloc, occlusion_poly, stroke_width)
             elif ch in _MIXED_CORNER_PARAMS:
                 draw_mixed_corner_outline(outlines_target, ch, xloc, yloc, occlusion_poly, stroke_width)
             elif ch in ('Rv', 'RV', 'Tv', 'TV', 'Rh', 'RH', 'Th', 'TH'):
@@ -6021,9 +5893,6 @@ def _render_layer_to_group(
                 elif ch in _ENDCAP_PARAMS:
                     draw_endcap_directional_shading(shading_target, ch, xloc, yloc, light_dir, shading_stroke_width, params,
                                                     pipe_polygon=pipe_poly, occlusion_polygon=occlusion_poly)
-                elif ch in _VANISHING_PARAMS:
-                    draw_vanishing_directional_shading(shading_target, ch, xloc, yloc, light_dir, shading_stroke_width, params,
-                                                        pipe_polygon=pipe_poly, occlusion_polygon=occlusion_poly)
                 elif ch in _MIXED_CORNER_PARAMS:
                     draw_mixed_corner_directional_shading(shading_target, ch, xloc, yloc, light_dir, shading_stroke_width, params,
                                                           pipe_polygon=pipe_poly, occlusion_polygon=occlusion_poly)

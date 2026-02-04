@@ -105,9 +105,6 @@ with st.sidebar:
                                  help="Faceted 90° corners (3 straight segments). Industrial look.")
         w_long_radius = st.slider("Long-Radius Elbows", 0.0, 5.0, 0.0, 0.1,
                                    help="Wide sweeping 90° corners with gentle arcs.")
-        w_vanishing = st.slider("Vanishing Pipes", 0.0, 5.0, 0.0, 0.1,
-                                 help="Pipes that taper to a point. Surreal dead-ends.")
-
     tile_weights = {
         'size': {'medium': w_medium, 'narrow': w_narrow, 'tiny': w_tiny},
         'shape': {'straight': w_straight, 'corner': w_corner,
@@ -117,7 +114,7 @@ with st.sidebar:
                   'junction': w_junction, 'reducer': w_reducer,
                   'endcap': w_endcap, 'mixed_corner': w_mixed_corner,
                   'sbend': w_sbend, 'segmented': w_segmented,
-                  'long_radius': w_long_radius, 'vanishing': w_vanishing},
+                  'long_radius': w_long_radius},
     }
 
     st.header("Spatial Size Gradient")
