@@ -2,7 +2,26 @@ import streamlit as st
 import streamlit.components.v1 as components
 import pipe_core
 import re
+import time
 from datetime import datetime
+
+
+def format_eta(start_time, current, total, min_samples=3):
+    """Return formatted ETA string, or empty string if not enough data."""
+    if current < min_samples or current >= total:
+        return ""
+    elapsed = time.time() - start_time
+    rate = current / elapsed
+    remaining_secs = (total - current) / rate
+
+    if remaining_secs < 60:
+        return " (~{:.0f}s remaining)".format(remaining_secs)
+    elif remaining_secs < 3600:
+        return " (~{:.0f}m remaining)".format(remaining_secs / 60)
+    else:
+        hours = int(remaining_secs // 3600)
+        mins = int((remaining_secs % 3600) // 60)
+        return " (~{}h {}m remaining)".format(hours, mins)
 
 st.set_page_config(page_title="Pipe Shading Preview", layout="wide")
 st.title("Pipe Shading Preview")
@@ -463,12 +482,15 @@ if view_mode == "Pipe Network":
 
     def _run_wfc(progress_label="", progress_scale=1.0, progress_offset=0.0, stripe_offset=0):
         """Run WFC with progress callback."""
+        wfc_start_time = time.time()
+
         def wfc_update(attempt, max_attempts, cells, total, backtracks=0):
             pct = progress_offset + min(cells / total, 1.0) * progress_scale
             bt_text = " ({} backtracks)".format(backtracks) if backtracks else ""
+            eta_text = format_eta(wfc_start_time, cells, total)
             wfc_progress.progress(min(pct, 1.0),
-                                  text="{} Attempt {} — {}/{} cells{}".format(
-                                      progress_label, attempt, cells, total, bt_text))
+                                  text="{} Attempt {} — {}/{} cells{}{}".format(
+                                      progress_label, attempt, cells, total, bt_text, eta_text))
 
         if grid_width > 16:
             return pipe_core.wave_function_collapse_striped(
@@ -485,12 +507,15 @@ if view_mode == "Pipe Network":
     def _run_wfc_with_dims(w, h, progress_label="", progress_scale=1.0,
                            progress_offset=0.0, stripe_offset=0):
         """Run WFC with specific dimensions (for density-preserving layers)."""
+        wfc_start_time = time.time()
+
         def wfc_update(attempt, max_attempts, cells, total, backtracks=0):
             pct = progress_offset + min(cells / total, 1.0) * progress_scale
             bt_text = " ({} backtracks)".format(backtracks) if backtracks else ""
+            eta_text = format_eta(wfc_start_time, cells, total)
             wfc_progress.progress(min(pct, 1.0),
-                                  text="{} Attempt {} — {}/{} cells{}".format(
-                                      progress_label, attempt, cells, total, bt_text))
+                                  text="{} Attempt {} — {}/{} cells{}{}".format(
+                                      progress_label, attempt, cells, total, bt_text, eta_text))
 
         # Scale mask to layer dimensions if mask enabled
         layer_mask = None
@@ -574,9 +599,12 @@ if view_mode == "Pipe Network":
 
         if st.session_state.get('render_key') != render_key or 'svg_string' not in st.session_state:
             progress_bar = st.progress(0, text="Rendering tiles...")
+            render_start_time = time.time()
 
             def update_progress(current, total):
-                progress_bar.progress(current / total, text="Rendering tile {} / {}".format(current, total))
+                eta_text = format_eta(render_start_time, current, total)
+                progress_bar.progress(current / total,
+                                      text="Rendering tile {} / {}{}".format(current, total, eta_text))
 
             if multilayer_enabled and scaled_layers_enabled:
                 layer_specs = []
@@ -633,6 +661,9 @@ if view_mode == "Pipe Network":
                     decoration_scale=decoration_scale,
                 )
             progress_bar.empty()
+            render_elapsed = time.time() - render_start_time
+            if render_elapsed > 10:
+                st.toast("Render complete! Ready to download.", icon="✅")
             st.session_state.svg_string = svg_string
             st.session_state.render_key = render_key
         else:
